@@ -1,4 +1,4 @@
-# kakaotalk-win
+# kakaotalk-mcp-win32message
 
 AI 에이전트가 Windows PC 카카오톡의 대화를 읽고, 찾고, 답장할 수 있게 해 주는 MCP 서버입니다.
 컴퓨터에 설치된 공식 카카오톡 앱을 사용하여 작동합니다.
@@ -44,14 +44,14 @@ PowerShell에서 실행합니다. 원하는 폴더에 가상 환경을 만들고
 
 ```powershell
 py -3 -m venv "$env:USERPROFILE\.kakaotalk-win"
-& "$env:USERPROFILE\.kakaotalk-win\Scripts\pip" install "https://github.com/Kwon-Sungeon/kakaotalk/releases/download/v0.1.0/kakaotalk_win-0.1.0-py3-none-any.whl"
+& "$env:USERPROFILE\.kakaotalk-win\Scripts\pip" install "https://github.com/Kwon-Sungeon/kakaotalk-mcp-win32message/releases/download/v0.1.0/kakaotalk_win-0.1.0-py3-none-any.whl"
 ```
 
 소스코드를 수정하려면 git 저장소를 받아 설치합니다.
 
 ```powershell
-git clone https://github.com/Kwon-Sungeon/kakaotalk.git
-cd kakaotalk
+git clone https://github.com/Kwon-Sungeon/kakaotalk-mcp-win32message.git
+cd kakaotalk-mcp-win32message
 py -3 -m venv .venv
 .venv\Scripts\pip install -e .
 ```

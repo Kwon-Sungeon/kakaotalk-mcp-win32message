@@ -1,4 +1,4 @@
-# kakaotalk-win 상세 문서
+# kakaotalk-mcp-win32message 상세 문서
 
 Windows의 공식 카카오톡 PC 앱을 **창 메시지(Win32)**로 조작하는 CLI·Python 헬퍼·MCP 서버입니다.
 
@@ -30,8 +30,8 @@ Windows의 공식 카카오톡 PC 앱을 **창 메시지(Win32)**로 조작하�
 Windows 10 또는 11에 Python 3.10 이상이 설치돼 있고, 공식 카카오톡 PC 앱에 로그인돼 있으면 됩니다. 컴파일러나 관리자 권한은 없어도 됩니다.
 
 ```powershell
-git clone https://github.com/Kwon-Sungeon/kakaotalk.git
-cd kakaotalk
+git clone https://github.com/Kwon-Sungeon/kakaotalk-mcp-win32message.git
+cd kakaotalk-mcp-win32message
 py -3 -m venv .venv
 .venv\Scripts\pip install -e .
 .venv\Scripts\kakaotalk-win status

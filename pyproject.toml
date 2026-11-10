@@ -19,8 +19,8 @@ classifiers = [
 dependencies = ["mcp>=1.30,<2"]
 
 [project.urls]
-Homepage = "https://github.com/Kwon-Sungeon/kakaotalk"
-Issues = "https://github.com/Kwon-Sungeon/kakaotalk/issues"
+Homepage = "https://github.com/Kwon-Sungeon/kakaotalk-mcp-win32message"
+Issues = "https://github.com/Kwon-Sungeon/kakaotalk-mcp-win32message/issues"
 
 [project.scripts]
 kakaotalk-win = "kakaotalk_win.cli:main"
