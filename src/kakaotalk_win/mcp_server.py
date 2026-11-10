@@ -51,9 +51,9 @@ def _app():
 
 def _with_picture(result, attach):
     parts = [TextContent(type="text", text=_json(result))]
-    picture = result.get("imagePath")
-    if attach and picture and result.get("status") == "ok":
-        parts.append(Image(path=picture).to_image_content())
+    pictures = result.get("imagePaths") or ([result["imagePath"]] if result.get("imagePath") else [])
+    if attach and result.get("status") == "ok":
+        parts.extend(Image(path=picture).to_image_content() for picture in pictures)
     return parts
 
 
@@ -81,21 +81,23 @@ def kakaotalk_win_windows() -> str:
 
 
 @mcp.tool(annotations=WINDOW)
-def kakaotalk_win_rooms(query: str = "", include_image: bool = False) -> Reply:
-    """메인 창의 채팅 목록 중 화면에 보이는 줄을 캡처하고 Windows OCR로 방 이름, 미리보기, 시각을 읽습니다.
+def kakaotalk_win_rooms(query: str = "", pages: int = 1, include_image: bool = False) -> Reply:
+    """메인 창의 채팅 목록을 캡처하고 Windows OCR로 방 이름, 참여 인원, 미리보기, 시각, 안 읽음 표시를 읽습니다.
 
+    목록은 최근 대화 순입니다. pages(1~10)만큼 목록을 아래로 내려 가며 읽고, 끝나면 맨 위로 되돌립니다.
+    endOfList=true면 목록 끝까지 읽은 것입니다. 방을 열지 않으므로 읽음 처리도 되지 않습니다.
     query가 있으면 앱의 채팅방 검색칸에 넣어 나온 결과를 읽은 뒤, 검색칸을 원래 내용으로 돌려놓습니다.
-    목록 전체가 아니라 보이는 줄만 읽습니다. 글자 인식이 틀릴 수 있으니 방을 열기 전에 이름을 확인하세요.
-    include_image=True이거나 OCR이 실패하면 목록 이미지도 같이 보냅니다.
+    글자 인식이 틀릴 수 있으니 방을 열기 전에 이름을 확인하세요(nameVariants는 아이콘이 글자로 읽혔을 때의 후보).
+    include_image=True이거나 OCR이 실패하면 캡처한 목록 이미지도 같이 보냅니다.
     """
-    result = _app().rooms(query=query)
+    result = _app().rooms(query=query, pages=pages)
     return _with_picture(result, include_image or _ocr_failed(result))
 
 
 @mcp.tool(annotations=WINDOW)
-def kakaotalk_win_search_rooms(query: str, include_image: bool = False) -> Reply:
+def kakaotalk_win_search_rooms(query: str, pages: int = 1, include_image: bool = False) -> Reply:
     """앱의 채팅방 검색에 query를 넣어 걸리는 방을 OCR로 읽어 옵니다. 끝나면 검색칸을 원래 내용으로 돌려놓습니다."""
-    result = _app().search_rooms(query)
+    result = _app().search_rooms(query, pages=pages)
     return _with_picture(result, include_image or _ocr_failed(result))
 
 
@@ -122,11 +124,23 @@ def kakaotalk_win_read(window_title: str, limit: int = 50, offset: int = 0, snap
     가장 최근 메시지 쪽에서 limit개를 잘라 오고, 그 안에서는 오래된 것부터 놓입니다.
     더 앞의 메시지는 응답의 nextOffset을 offset에, snapshotId를 snapshot_id에 넣어 다시 부르면 됩니다.
     사진, 동영상, 이모티콘, 파일은 kind=media와 mediaType으로만 나옵니다. 내용을 보려면 read_attachment를 쓰세요.
-    500자가 넘는 메시지는 앱이 앞 500자만 내주므로 textTruncated=true가 붙습니다. 요약할 때 뒷부분이 빠졌다고 밝히세요.
+    500자가 넘는 메시지는 앱이 앞 500자만 내주므로 textTruncated=true가 붙습니다. 전체 본문은 kakaotalk_win_read_full_text로 받으세요.
     창 위치와 쓰다 만 글은 바꾸지 않고, 잠시 쓴 클립보드는 읽은 뒤 원래 내용으로 돌려놓습니다.
     아직 불러오지 않은 옛 대화는 kakaotalk_win_load_more를 먼저 부른 다음 읽으세요.
     """
     return _json(_app().read_messages(window_title, limit, offset, snapshot_id))
+
+
+@mcp.tool(annotations=SCROLL)
+def kakaotalk_win_read_full_text(window_title: str, max_messages: int = 3, scroll_pages: int = 10) -> str:
+    """500자가 넘어 앞부분만 읽힌 메시지(textTruncated=true)의 전체 본문을 가져옵니다. 최근 것부터 max_messages개(1~10)입니다.
+
+    대화창에서 메시지 아래 '전체보기'를 눌러 열리는 창의 글을 복사한 뒤 그 창을 바로 닫습니다.
+    클릭은 창 메시지로 보내므로 마우스 커서가 움직이지 않고 다른 창의 포커스도 바꾸지 않습니다.
+    버튼이 화면 밖에 있으면 대화를 한 화면씩 위로 올려 찾고(최대 scroll_pages번, 0~30), 끝나면 맨 아래로 돌아갑니다.
+    찾지 못한 메시지는 notFound에 나옵니다. 돌려주는 index는 kakaotalk_win_read 결과의 index와 같습니다.
+    """
+    return _json(_app().read_full_text(window_title, max_messages, scroll_pages))
 
 
 @mcp.tool(annotations=SCROLL)

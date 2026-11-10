@@ -29,7 +29,12 @@ class BITMAPINFOHEADER(ctypes.Structure):
 
 
 def grab(hwnd):
-    """Return (width, height, BGRA bytes) of the whole window."""
+    """Return (width, height, BGRA bytes) of the whole window, at the size the app itself draws."""
+    with w.window_dpi(hwnd):
+        return _grab(hwnd)
+
+
+def _grab(hwnd):
     left, top, right, bottom = w.rect(hwnd)
     width, height = right - left, bottom - top
     if width <= 0 or height <= 0:
@@ -127,14 +132,18 @@ $bitmap = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.S
 $result = Await ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
 $lines = foreach ($line in $result.Lines) {
   $xs = $line.Words | ForEach-Object { $_.BoundingRect }
+  $words = foreach ($word in $line.Words) { $r = $word.BoundingRect
+    [pscustomobject]@{ text = $word.Text; left = [int]$r.X; top = [int]$r.Y; right = [int]($r.X + $r.Width);
+      bottom = [int]($r.Y + $r.Height) } }
   [pscustomobject]@{ text = $line.Text; left = [int]($xs | Measure-Object X -Minimum).Minimum;
     top = [int]($xs | Measure-Object Y -Minimum).Minimum;
     right = [int](($xs | ForEach-Object { $_.X + $_.Width }) | Measure-Object -Maximum).Maximum;
-    bottom = [int](($xs | ForEach-Object { $_.Y + $_.Height }) | Measure-Object -Maximum).Maximum }
+    bottom = [int](($xs | ForEach-Object { $_.Y + $_.Height }) | Measure-Object -Maximum).Maximum;
+    words = @($words) }
 }
 $stream.Dispose()
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
-@{ status = 'ok'; language = $env:KAKAOTALK_OCR_LANG; lines = @($lines) } | ConvertTo-Json -Depth 4 -Compress
+@{ status = 'ok'; language = $env:KAKAOTALK_OCR_LANG; lines = @($lines) } | ConvertTo-Json -Depth 6 -Compress
 """
 
 
@@ -142,7 +151,7 @@ def ocr(png_path, language="ko"):
     """Run the Windows built-in OCR engine (Windows.Media.Ocr) on a local PNG.
 
     Uses Windows PowerShell 5.1 to reach the WinRT API; no network, no extra install.
-    Returns {"status": "ok", "lines": [{text, left, top, right, bottom}, ...]}.
+    Returns {"status": "ok", "lines": [{text, left, top, right, bottom, words: [{text, left, ...}]}, ...]}.
     """
     env = {**os.environ, "KAKAOTALK_OCR_IMAGE": str(Path(png_path).resolve()), "KAKAOTALK_OCR_LANG": language}
     try:

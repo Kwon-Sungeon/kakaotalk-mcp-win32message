@@ -16,13 +16,15 @@ MCP가 연결돼 있지 않을 때는 `kakaotalk-win call METHOD --args-file C:\
 3. 닫혀 있는 방은 `kakaotalk_win_open`에 정확한 이름을 넣어 연다.
    이름이 확실하지 않으면 `kakaotalk_win_search_rooms`나 `kakaotalk_win_rooms`로 후보를 찾는다. 후보 이름은 화면 글자 인식 결과라 틀릴 수 있으니 사용자에게 맞는지 묻는다.
    이름이 같은 방이 여럿이면 그중 하나를 골라 진행하지 않는다.
+4. "최근 1시간에 온 카톡"처럼 여러 방의 새 대화를 물으면 `kakaotalk_win_rooms`에 `pages`를 주어 목록을 내려 가며 시각(`timeText`)과 `hasUnread`를 본다.
+   해당 시간대를 벗어나는 방이 나오거나 `endOfList=true`가 될 때까지 읽는다. 목록만 보는 것은 읽음 처리가 되지 않지만, 방을 열어 읽으면 읽음 처리된다는 점을 사용자에게 알린다.
 
 ## 읽고 찾기
 
 - 방 하나는 `kakaotalk_win_read`, 여러 방은 `kakaotalk_win_read_many`로 읽는다.
 - 메시지 원문은 `items`의 `sender`, `date`, `time`, `text`다. `kind=media`는 사진·동영상·이모티콘·파일이 있었다는 표시뿐이다.
   내용을 봐야 하면 `kakaotalk_win_read_attachment`가 돌려준 캡처 이미지를 직접 본다.
-- `textTruncated=true`인 메시지는 500자가 넘어서 앞부분만 받은 것이다. 요약하거나 인용할 때 뒷부분이 빠졌다고 밝힌다.
+- `textTruncated=true`인 메시지는 500자가 넘어서 앞부분만 받은 것이다. 내용이 필요하면 `kakaotalk_win_read_full_text`로 전체 본문을 받는다. 받지 못했으면 뒷부분이 빠졌다고 밝힌다.
 - 응답에 `hasMore=true`가 있으면 `nextOffset`을 `offset`에, `snapshotId`를 `snapshot_id`에 넣어 이어 읽는다.
   그사이 대화가 바뀌어 `snapshot_changed`가 오면 offset 0부터 새로 읽는다.
 - "지난주 대화 전부"처럼 기간을 요청받으면 `kakaotalk_win_load_more`로 몇 번만 더 불러온다. 답할 때는 `coverage.oldestDate`부터 읽었다고 밝히고, 대화의 처음까지 다 봤다고 말하지 않는다.

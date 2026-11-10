@@ -36,7 +36,11 @@ WM_KEYDOWN = 0x0100
 WM_KEYUP = 0x0101
 WM_CHAR = 0x0102
 WM_VSCROLL = 0x0115
+WM_MOUSEMOVE = 0x0200
+WM_LBUTTONDOWN = 0x0201
+WM_LBUTTONUP = 0x0202
 WM_MOUSEWHEEL = 0x020A
+MK_LBUTTON = 0x0001
 EM_SETSEL = 0x00B1
 EM_REPLACESEL = 0x00C2
 SMTO_ABORTIFHUNG = 0x0002
@@ -99,6 +103,9 @@ _SIGNATURES = {
     (user32, "ReleaseDC"): (ctypes.c_int, [HWND, wintypes.HDC]),
     (user32, "PrintWindow"): (BOOL, [HWND, wintypes.HDC, UINT]),
     (user32, "SetProcessDpiAwarenessContext"): (BOOL, [HANDLE]),
+    (user32, "GetWindowDpiAwarenessContext"): (HANDLE, [HWND]),
+    (user32, "GetDpiForWindow"): (UINT, [HWND]),
+    (user32, "SetThreadDpiAwarenessContext"): (HANDLE, [HANDLE]),
     (kernel32, "GetCurrentThreadId"): (DWORD, []),
     (kernel32, "GlobalAlloc"): (HANDLE, [UINT, ctypes.c_size_t]),
     (kernel32, "GlobalLock"): (ctypes.c_void_p, [HANDLE]),
@@ -255,6 +262,29 @@ def post_key(hwnd, vk):
     post(hwnd, WM_KEYUP, vk, key_lparam(vk, up=True))
 
 
+def post_click(hwnd, x, y):
+    """Left click at client point (x, y) delivered as window messages.
+
+    The real mouse cursor does not move and no window is activated. Coordinates
+    are in the target window's own DPI space (see ``window_dpi``).
+    """
+    point = (x & 0xFFFF) | ((y & 0xFFFF) << 16)
+    post(hwnd, WM_MOUSEMOVE, 0, point)
+    time.sleep(0.05)
+    post(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, point)
+    time.sleep(0.05)
+    post(hwnd, WM_LBUTTONUP, 0, point)
+
+
+def window_scale(hwnd):
+    """The app's drawing scale relative to 144 DPI (150%), the scale the layout constants were measured at."""
+    try:
+        dpi = user32.GetDpiForWindow(hwnd)
+    except AttributeError:  # pragma: no cover
+        dpi = 0
+    return (dpi or 96) / 144
+
+
 class modifier_state:
     """Make GetKeyState() in the target's input queue report modifiers as held.
 
@@ -354,6 +384,35 @@ def file_version(path):
 def remote_session():
     user32.GetSystemMetrics.argtypes = [ctypes.c_int]
     return bool(user32.GetSystemMetrics(0x1000))  # SM_REMOTESESSION
+
+
+class window_dpi:
+    """Measure, capture and point in the target window's own coordinates.
+
+    KakaoTalk is system-DPI aware. On a monitor whose scale differs from the
+    system scale, Windows stretches its output, so the on-screen rect is not
+    the size the app draws at. Inside this block our thread uses the app's DPI
+    context: GetWindowRect, PrintWindow and mouse-message coordinates all match
+    what the app itself draws.
+    """
+
+    def __init__(self, hwnd):
+        self.hwnd = hwnd
+        self.previous = None
+
+    def __enter__(self):
+        try:
+            context = user32.GetWindowDpiAwarenessContext(self.hwnd)
+            if context:
+                self.previous = user32.SetThreadDpiAwarenessContext(context)
+        except AttributeError:  # pragma: no cover - Windows before 10 1607
+            pass
+        return self
+
+    def __exit__(self, *_):
+        if self.previous:
+            user32.SetThreadDpiAwarenessContext(self.previous)
+        return False
 
 
 def enable_dpi_awareness():

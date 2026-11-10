@@ -66,12 +66,13 @@ Claude Code에서는 `claude mcp add kakaotalk-win -- "C:\...\.venv\Scripts\kaka
 |---|---|---|---|
 | 상태 확인 | `kakaotalk_win_status` | `status` | 프로세스·서명·잠금·클립보드 설정 |
 | 열린 창 | `kakaotalk_win_windows` | `windows` | 창 열거, 초안 유무만 확인 |
-| 채팅방 목록 | `kakaotalk_win_rooms` | `rooms` | 목록 캡처 + OCR |
+| 채팅방 목록 | `kakaotalk_win_rooms` | `rooms` | 목록 캡처 + OCR, `pages`만큼 `SB_LINEDOWN`으로 내려 가며 캡처 후 `SB_TOP` |
 | 방 검색 | `kakaotalk_win_search_rooms` | `search_rooms` | 앱 검색칸 + OCR, 검색칸 원상복구 |
 | 방 열기 | `kakaotalk_win_open` | `open_room` | 검색칸 + Enter, 제목이 다르면 다시 닫음 |
 | 창 닫기 | `kakaotalk_win_close` | `close_room` | `WM_CLOSE`, 초안 있으면 중단 |
 | 메시지 읽기 | `kakaotalk_win_read` | `read_messages` | 복사 텍스트 → 날짜·보낸 사람·시각·본문 |
 | 사진 읽기 | `kakaotalk_win_read_attachment` | `capture` | 대화창 캡처(PNG) + 선택적 OCR |
+| 긴 메시지 전체 | `kakaotalk_win_read_full_text` | `read_full_text` | '전체보기' 위치에 클릭 메시지 → 열린 창에서 Ctrl+A/C → `WM_CLOSE` |
 | 여러 방 읽기 | `kakaotalk_win_read_many` | `read_many` | 순차 (클립보드가 하나) |
 | 이전 대화 | `kakaotalk_win_load_more` | `load_more` | `WM_VSCROLL`, 안 되면 `WM_MOUSEWHEEL` |
 | 본문 검색 | `kakaotalk_win_search` | `search_messages` | 불러온 메시지에서 직접 검색 |
@@ -83,6 +84,10 @@ Claude Code에서는 `claude mcp add kakaotalk-win -- "C:\...\.venv\Scripts\kaka
 - **보낸 사람과 시각이 나옵니다.** 복사 텍스트에 `[보낸사람] [오후 3:05] 본문` 형식으로 들어 있습니다.
 - **사진·이모티콘·파일은 `kind=media`, `mediaType`으로만 표시됩니다.** 내용은 `read_attachment`로 창을 캡처해서 확인합니다. 사진 한 장만 골라 자르지는 못합니다.
 - **채팅방 목록은 OCR입니다.** 목록 컨트롤에 텍스트를 읽을 방법이 없어서 화면 글자를 인식합니다. 이름이 틀릴 수 있습니다. 방 열기는 OCR과 상관없이 앱 검색과 창 제목으로 정확히 확인합니다.
+  - `pages`를 주면 방 한 줄 정도 겹치게 내려 가며 여러 번 캡처하고, 겹친 줄은 합칩니다. 끝나면 목록을 맨 위로 되돌립니다. 방을 열지 않으므로 읽음 처리되지 않습니다.
+  - 이름 뒤 숫자는 `memberCount`(참여 인원)로 분리합니다. 이름 앞 아이콘이 글자로 읽힌 경우 `nameVariants`에 후보를 함께 줍니다.
+  - 안 읽은 메시지 배지는 숫자 인식이 자주 틀려서, 배지의 빨간색으로 `hasUnread`를 판단하고 숫자는 읽힌 경우만 `unread`에 넣습니다.
+- **화면 배율이 다른 모니터에서도 캡처가 맞습니다.** 카카오톡은 시스템 배율 기준으로 그리기 때문에, 배율이 다른 모니터에서는 Windows가 화면을 늘리거나 줄여 보여 줍니다. 캡처와 좌표 계산은 카카오톡 창의 배율 기준(`GetWindowDpiAwarenessContext`, `SetThreadDpiAwarenessContext`)으로 해서 잘리지 않습니다.
 
 ## 읽기와 클립보드
 
@@ -99,7 +104,14 @@ Claude Code에서는 `claude mcp add kakaotalk-win -- "C:\...\.venv\Scripts\kaka
 읽을 수 있는 범위는 대화창에 불러와진 메시지까지입니다. `load_more`로 더 불러올 수 있지만, 늘어나지 않았다고 대화의 처음에 도달했다고 단정하지 않습니다(`historyComplete=false`).
 
 500자가 넘는 메시지는 카카오톡이 대화창에 앞 500자만 보여 주고(나머지는 '전체보기') 복사할 때도 그 부분 뒤에 `...`만 붙여 줍니다.
-이런 메시지에는 `textTruncated: true`가 붙고, `text`에는 앞 500자만 들어 있습니다. 전체 내용은 카카오톡에서 직접 열어 봐야 합니다.
+이런 메시지에는 `textTruncated: true`가 붙고, `text`에는 앞 500자만 들어 있습니다. 전체 본문은 `read_full_text`로 받습니다.
+
+1. 대화창을 캡처해 OCR로 '전체보기' 버튼 위치를 찾습니다. 캡처 파일은 OCR이 끝나면 바로 지웁니다.
+2. 그 위치에 클릭을 창 메시지(`WM_LBUTTONDOWN`/`WM_LBUTTONUP`)로 보냅니다. 마우스 커서는 움직이지 않고, 사용 중인 다른 창의 포커스도 바뀌지 않습니다.
+3. 열린 '…님의 메시지' 창의 본문에서 Ctrl+A, Ctrl+C로 전체 글을 받고(클립보드는 읽기와 같은 방식으로 되돌림), 창을 `WM_CLOSE`로 닫습니다.
+4. 받은 글의 앞 500자와 보낸 사람이 잘린 메시지와 같은지 확인한 뒤 돌려줍니다.
+5. 버튼이 화면 밖에 있으면 한 화면씩 위로 올려 찾고, 끝나면 맨 아래로 돌아갑니다.
+
 500자가 넘는 글을 보낸 경우에도 전송 확인은 화면에 보이는 앞 500자로 합니다.
 
 ## 전송
@@ -221,7 +233,7 @@ kakaotalk-win call send_result --args-file C:\absolute\path\result.json
 - 카카오톡이 업데이트되면 내부 창 이름이나 복사 형식이 바뀔 수 있습니다.
   바뀌면 해당 기능이 `blocked`나 `unclassified`로 멈추고, 추측해서 동작하지 않습니다.
 - 확인한 환경은 카카오톡 PC 26.9.2(한국어 UI)와 Windows 11입니다.
-- 화면 배율(DPI)이 다른 모니터에서는 OCR 결과가 달라질 수 있습니다.
+- 채팅 목록의 이름·시각은 OCR이라 글자가 틀릴 수 있습니다. 목록 배치(줄 높이, 프로필 사진 폭)는 카카오톡 PC 26.9.2 기준으로 맞춰 두었습니다.
 - 카카오톡을 여러 개 실행했거나(멀티 프로필) 원격 데스크톱 안에서 쓰는 경우는 지원하지 않습니다.
 
 ## 검증

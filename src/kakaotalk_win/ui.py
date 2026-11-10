@@ -18,6 +18,10 @@ tool per feature.
     │   └─ _EVA_CustomScrollCtrl   (WM_VSCROLL on the list loads older messages)
     ├─ RICHEDIT50W                composer (WM_GETTEXT / WM_SETTEXT, Enter sends)
     └─ Edit                       in-room search box (unused; search is done locally)
+
+    "전체보기" viewer (EVA_Window_Dblclk, title "<sender>님의 메시지", opened by the
+    button under a message longer than 500 characters)
+    └─ EVA_ChildWindow_Dblclk     full message text (Ctrl+A, Ctrl+C -> clipboard text)
 """
 
 import os
@@ -36,9 +40,12 @@ CHAT_LIST_CTRL = "ChatRoomListCtrl_"
 CHAT_SEARCH_LIST = "SearchListCtrl_"
 CONTACT_VIEW = "ContactListView_"
 LOCK_VIEW = "LockModeView_"
+VIEWER_BODY_CLASS = "EVA_ChildWindow_Dblclk"
+VIEW_ALL_LABELS = ("전체보기", "View All", "See All")
+VIEWER_TITLE_SUFFIXES = ("님의 메시지", "'s message", "'s Message")
 
 # The empty composer reports its placeholder through WM_GETTEXT.
-DEFAULT_PLACEHOLDERS = ("메시지 입력", "Enter a message", "Type a message", "メッセージを入力")
+DEFAULT_PLACEHOLDERS = ("메시지 입력", "챗봇에게 메시지 입력", "Enter a message", "Type a message", "メッセージを入力")
 
 
 def placeholders():
