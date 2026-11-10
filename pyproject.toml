@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kakaotalk-win"
+version = "0.1.0"
+description = "MCP server that lets AI agents read, search and reply in KakaoTalk PC on Windows, using only the official app"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Kwon-Sungeon" }]
+keywords = ["kakaotalk", "mcp", "mcp-server", "windows", "automation"]
+classifiers = [
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Topic :: Communications :: Chat",
+]
+dependencies = ["mcp>=1.30,<2"]
+
+[project.urls]
+Homepage = "https://github.com/Kwon-Sungeon/kakaotalk"
+Issues = "https://github.com/Kwon-Sungeon/kakaotalk/issues"
+
+[project.scripts]
+kakaotalk-win = "kakaotalk_win.cli:main"
+
+[tool.setuptools]
+packages = ["kakaotalk_win"]
+
+[tool.setuptools.package-dir]
+"" = "src"

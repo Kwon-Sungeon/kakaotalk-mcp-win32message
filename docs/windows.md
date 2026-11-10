@@ -1,0 +1,229 @@
+# kakaotalk-win 상세 문서
+
+Windows의 공식 카카오톡 PC 앱을 **창 메시지(Win32)**로 조작하는 CLI·Python 헬퍼·MCP 서버입니다.
+
+카카오 서버나 프로토콜과 통신하지 않습니다. 카카오톡의 파일·DB·메모리를 읽지 않으며 앱을 변조하지도 않습니다.
+사람이 PC 카카오톡 창에서 하는 동작을 그대로 보냅니다. 복사, 검색칸 입력, 입력창 입력, Enter가 전부입니다.
+
+> **고지:** 카카오와 무관한 비공식 도구입니다. 카카오는 이용 환경·이용 패턴 분석만으로도 보호조치를 할 수 있다고 밝히고 있습니다.
+> 아래 안전장치는 위험을 줄이려는 것이며 계정 이용제한을 막는다고 보장하지 않습니다.
+> 이용제한 위험과 다른 사람의 대화를 다루는 책임은 사용하는 사람에게 있습니다.
+> 이 도구는 대화를 저장하지 않습니다. 대화 기록·모니터링 기능을 덧붙이면 다른 사람의 개인정보를 수집·저장하는 일이 되므로 약관과 개인정보보호법을 먼저 검토하세요.
+
+## 동작 방식
+
+| 대상 | 찾는 방법 | 쓰는 동작 |
+|---|---|---|
+| 대화창 | `EVA_Window_Dblclk` 최상위 창. 제목이 방 이름 | 목록, 닫기 (`WM_CLOSE`) |
+| 메시지 목록 | `EVA_VH_ListControl_Dblclk` | Ctrl+A, Ctrl+C를 창에 직접 보냄 → 클립보드 텍스트 파싱 |
+| 입력창 | `RICHEDIT50W` | `EM_REPLACESEL`로 입력 → Enter 한 번 |
+| 채팅방 검색칸 | 메인 창 `ChatRoomListView_*` 아래 `Edit` | 방 이름 입력 + Enter (기존 방 열기) |
+| 채팅방 목록 | `ChatRoomListCtrl_*` (텍스트 API 없음) | `PrintWindow` 캡처 + Windows 내장 OCR |
+| 잠금 화면 | `LockModeView_*` | 감지만 하고 건드리지 않음 |
+
+내부 창 이름(`ChatRoomListView_…` 등)은 UI 언어와 상관이 없어서 한국어·영어 UI에서 똑같이 찾습니다.
+모든 동작은 대상 창에 직접 보내는 메시지입니다. **창을 앞으로 띄우지 않고 마우스·키보드도 쓰지 않습니다.**
+대화창이 다른 창에 가려져 있거나 최소화돼 있어도 읽고 보낼 수 있습니다. 대화창이 열려 있기만 하면 됩니다.
+
+## 설치
+
+Windows 10/11, Python 3.10 이상, 로그인된 공식 카카오톡 PC 앱이 필요합니다. 컴파일러나 관리자 권한은 필요 없습니다.
+
+```powershell
+git clone https://github.com/Kwon-Sungeon/kakaotalk.git
+cd kakaotalk
+py -3 -m venv .venv
+.venv\Scripts\pip install -e .
+.venv\Scripts\kakaotalk-win status
+.venv\Scripts\kakaotalk-win config --self-name "내 카카오톡 프로필 이름"
+.venv\Scripts\kakaotalk-win mcp-config
+```
+
+저장소를 받지 않고 릴리스 파일로 설치할 수도 있습니다(README의 "빠른 시작" 참고).
+
+`status`는 카카오톡 실행·서명·잠금 상태, 열린 대화창 수, 클립보드 기록 설정, 전송 한도를 보여 줍니다.
+메시지는 읽지 않습니다. `warnings`가 비어 있는지 확인하세요.
+`--self-name`은 선택 사항입니다. 설정하면 전송 확인에서 보낸 사람이 나인지 검사하고, `require_self`(나와의 채팅만 허용)를 쓸 수 있습니다.
+
+`mcp-config`는 이 설치 경로에 맞는 설정을 출력합니다.
+
+```json
+{
+  "mcpServers": {
+    "kakaotalk-win": {
+      "command": "C:\\absolute\\path\\kakaotalk\\.venv\\Scripts\\kakaotalk-win.exe",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Claude Code에서는 `claude mcp add kakaotalk-win -- "C:\...\.venv\Scripts\kakaotalk-win.exe" mcp`로 등록합니다.
+
+## 도구와 구현
+
+| 기능 | MCP 도구 | Python 메서드 | 구현 |
+|---|---|---|---|
+| 상태 확인 | `kakaotalk_win_status` | `status` | 프로세스·서명·잠금·클립보드 설정 |
+| 열린 창 | `kakaotalk_win_windows` | `windows` | 창 열거, 초안 유무만 확인 |
+| 채팅방 목록 | `kakaotalk_win_rooms` | `rooms` | 목록 캡처 + OCR |
+| 방 검색 | `kakaotalk_win_search_rooms` | `search_rooms` | 앱 검색칸 + OCR, 검색칸 원상복구 |
+| 방 열기 | `kakaotalk_win_open` | `open_room` | 검색칸 + Enter, 제목이 다르면 다시 닫음 |
+| 창 닫기 | `kakaotalk_win_close` | `close_room` | `WM_CLOSE`, 초안 있으면 중단 |
+| 메시지 읽기 | `kakaotalk_win_read` | `read_messages` | 복사 텍스트 → 날짜·보낸 사람·시각·본문 |
+| 사진 읽기 | `kakaotalk_win_read_attachment` | `capture` | 대화창 캡처(PNG) + 선택적 OCR |
+| 여러 방 읽기 | `kakaotalk_win_read_many` | `read_many` | 순차 (클립보드가 하나) |
+| 이전 대화 | `kakaotalk_win_load_more` | `load_more` | `WM_VSCROLL`, 안 되면 `WM_MOUSEWHEEL` |
+| 본문 검색 | `kakaotalk_win_search` | `search_messages` | 불러온 메시지에서 직접 검색 |
+| 전송 | `kakaotalk_win_send` | `send_message` | 아래 "전송" 참고 |
+| 전송 결과 | `kakaotalk_win_send_result` | `send_result` | 기록 조회 + 읽기만으로 재확인 |
+
+알아 둘 점:
+
+- **보낸 사람과 시각이 나옵니다.** 복사 텍스트에 `[보낸사람] [오후 3:05] 본문` 형식으로 들어 있습니다.
+- **사진·이모티콘·파일은 `kind=media`, `mediaType`으로만 표시됩니다.** 내용은 `read_attachment`로 창을 캡처해서 확인합니다. 사진 한 장만 골라 자르지는 못합니다.
+- **채팅방 목록은 OCR입니다.** 목록 컨트롤에 텍스트를 읽을 방법이 없어서 화면 글자를 인식합니다. 이름이 틀릴 수 있습니다. 방 열기는 OCR과 상관없이 앱 검색과 창 제목으로 정확히 확인합니다.
+
+## 읽기와 클립보드
+
+읽기는 카카오톡이 자기 목록을 클립보드에 복사하게 해서 그 텍스트를 받습니다. 클립보드는 다른 프로그램과 같이 쓰기 때문에 매번 이렇게 처리합니다.
+
+1. 사용자의 클립보드를 형식째(텍스트, HTML, 이미지, 파일 목록, 앱 전용 형식) 저장합니다. 되살릴 수 없는 일부 GDI 핸들 형식은 결과의 `unpreservedFormats`로 알립니다.
+2. 클립보드를 열지 않고 변경 번호만 보면서 카카오톡의 복사가 끝나기를 기다립니다. 카카오톡이 쓰는 도중에 충돌하지 않습니다.
+3. 클립보드 소유자가 카카오톡 프로세스일 때만 텍스트를 받습니다.
+4. 저장해 둔 내용을 되돌립니다. 그사이 사용자가 직접 복사했다면 사용자의 것을 남기고 덮어쓰지 않습니다.
+
+한 번 읽는 데 0.1초 안팎(실측 약 75ms)입니다. 그 짧은 순간에 사용자가 붙여넣기를 하면 대화 내용이 붙여넣어질 수 있습니다.
+이건 클립보드 방식의 한계입니다. Windows 클립보드 기록(Win+V)이나 클라우드 동기화가 켜져 있으면 복사된 대화가 거기 남을 수 있어서, `status`가 경고합니다.
+
+읽을 수 있는 범위는 대화창에 불러와진 메시지까지입니다. `load_more`로 더 불러올 수 있지만, 늘어나지 않았다고 대화의 처음에 도달했다고 단정하지 않습니다(`historyComplete=false`).
+
+## 전송
+
+`kakaotalk_win_send(window_title, text, operation_id)` 한 번은 이렇게 진행됩니다. 하나라도 통과하지 못하면 아무것도 입력하지 않습니다.
+
+1. **operation_id 기록 확인.** 같은 ID는 다시 입력하지 않고 결과만 다시 확인합니다. 같은 ID를 다른 방이나 본문에 쓰면 거부합니다.
+2. **계정 안전 한도.** 아래 "이용제한을 피하는 설계"의 한도를 넘으면 차단합니다.
+3. **대상 확인.** 기존 방만 대상입니다. 닫혀 있으면 앱 검색으로 엽니다. 다음 경우에는 보내지 않습니다.
+   - 대화 기록이 없는 방
+   - 입력창에 초안이 있는 방
+   - 동명 방 창이 여러 개인 경우
+   - 잠금 화면 상태
+   - 최근 안내 문구에 보호조치·이용제한이 보이는 경우
+4. **(선택) 확인창.** 기본값은 꺼져 있습니다. 사람의 확인은 MCP 클라이언트(Claude Code/Desktop)가 도구를 호출할 때마다 묻는 승인으로 대신합니다.
+   `kakaotalk-win config --confirm dialog`로 켜면 매 전송마다 받는 방과 본문을 보여 주는 확인창이 뜨고, [예]를 눌러야 보내집니다.
+   이 확인창의 기본 단추는 [아니오]이고, 120초 동안 답이 없으면 취소됩니다. 확인창은 MCP 서버 프로세스가 띄우므로 AI 에이전트가 대신 누를 수 없습니다.
+   확인창은 AI가 방이나 본문을 잘못 고르는 실수를 막기 위한 장치입니다. 카카오 쪽에서는 보이지 않으므로 이용제한 위험과는 관계가 없습니다. 이용제한 위험은 2~3단계의 한도와 대상 제한이 맡습니다.
+5. **기록 후 입력.** 전송 의도를 디스크에 먼저 기록합니다. 그다음 입력창에 `EM_REPLACESEL`로 넣고, 다시 읽어 똑같은지 확인한 뒤 Enter를 한 번만 보냅니다.
+   카카오톡 PC(2026-11)는 `WM_SETTEXT`로 넣은 글자를 화면에 표시만 하고 보내지 않습니다.
+   다른 입력 방식으로 자동 재시도하지 않습니다. 재시도하면 두 번 전송될 수 있기 때문입니다.
+6. **관찰.** 다시 읽어서 직전 메시지들 뒤에 같은 본문의 새 메시지가 생기고 입력창이 비면 `observed_in_window`입니다. 보낸 사람이 설정한 내 이름과 같으면 `authorVerified=true`입니다.
+   이 결과는 서버 수신이나 상대방 읽음을 확인한 것이 아닙니다.
+
+결과 상태:
+
+| status | 뜻 | 할 일 |
+|---|---|---|
+| `observed_in_window` | 새 메시지와 빈 입력창을 관찰함 | 끝 |
+| `blocked` + `dispatched=false` | 아무것도 입력·전송하지 않음 (`reason` 참고) | 사유를 해결하기 전에는 반복하지 않음 |
+| `blocked` + `enter_not_accepted_text_removed` | Enter가 먹지 않아 넣었던 글자를 지움 | 사용자에게 알림 (2회 연속이면 안전 정지) |
+| `outcome_unknown` | 보냈는지 확인 못 함 | **재전송 금지**. 같은 ID로 `send_result`만 조회 |
+
+본문은 기록 파일에 해시로만 남습니다. 파일 전송, 메시지 수정·삭제, 멘션, 예약 발송은 제공하지 않습니다.
+
+## 이용제한을 피하는 설계
+
+2026-11-10에 다음 원문을 직접 확인하고 설계했습니다.
+
+- 카카오 통합서비스약관 (시행 2026-09-30)
+- 카카오계정약관 (시행 2026-09-30)
+- 카카오 운영정책
+- 카카오톡 운영정책 (talksafety, 시행 2025-12-06)
+- 공개 피해 사례
+
+카카오가 명시한 제한 사유와 이 도구의 대응은 다음과 같습니다.
+
+| 카카오가 명시한 제한 사유 | 근거 | 이 도구의 대응 |
+|---|---|---|
+| 허용하지 않은 프로그램으로 프로토콜·API 호출 | talksafety 비정상 이용: 즉시 한시·영구 제한 | **하지 않음.** 서버·프로토콜 접근 없음. 공식 앱 UI만 사용 |
+| 역설계·변조, 기술적 보호조치 무력화 | 통합약관 제12조①11 | **하지 않음.** DB 복호화·메모리 읽기·DLL 주입·후킹·실행 파일 패치·설정 파일 수정 없음. 문서화된 창 메시지만 사용 |
+| 짧은 기간 많은 채팅방 생성·친구 추가 | talksafety 보호조치 사례 | **기능 자체가 없음.** 새 방·친구 추가·초대·오픈채팅 참여·개설 없음. 대화 기록 없는 방에는 전송 차단. 방 열기 분당 6회 |
+| 짧은 시간 많은 메시지 전송 | 보호조치 유형 (임계값 비공개) | 전송 간격 10초 이상, 시간당 20건, 하루 100건, 방별 시간당 10건, 시간당 10개 방 |
+| 같은 내용 반복 전송·광고 | 운영정책 §3②(18), talksafety 스팸 | 30자를 넘거나 링크가 든 같은 본문은 24시간 동안 다른 방에 못 보냄. 링크가 있으면 결과 `warnings`로 알림. 여러 방 동시 발송 기능 없음 |
+| 신고 누적 | talksafety 신고 누적 | 자동응답·예약·반복 발송 기능 없음. 요청한 방·본문만 전송(MCP 클라이언트 승인, 선택적 확인창) |
+| 비정상 이용 환경 (에뮬레이터 등) | talksafety 보호조치 사례 | `status`가 원격 데스크톱 세션과 서명되지 않은 카카오톡을 경고 |
+| 타인 개인정보 수집·제공 | 통합약관 제12조①13 | 요청한 방의 불러온 메시지만 읽음. 저장·일괄 내보내기·프로필 수집 없음 |
+| 자동화 프로그램 배포·홍보 | talksafety 비정상 이용 | 대량 발송 기능이 코드에 없음. 오픈채팅 등에서 "카톡 봇"으로 홍보하지 말 것 |
+
+순정 PC 앱에 창 메시지를 보내는 UI 자동화를 직접 금지하는 조항은 찾지 못했습니다.
+이 방식만으로 제한됐다는 보고(무엇을 했는지 밝힌 것)도 찾지 못했습니다.
+다만 **보고가 없다고 안전하다는 보장은 아닙니다.** 카카오는 탐지가 서버 쪽에서 이용 환경·이용 패턴 분석과 신고로 이루어진다고 밝힙니다.
+그래서 이 도구는 "사람이 평소에 쓰는 속도와 방식"을 넘지 않는 것을 원칙으로 삼습니다.
+
+확인하지 못한 것도 있습니다.
+
+- 카카오의 실제 임계값
+- 클라이언트 텔레메트리가 있는지
+- 대화 내용을 LLM 사업자에게 넘기는 것이 약관상 '제3자 제공'에 해당하는지
+
+마지막 것은 해석의 문제이니, 다른 사람의 대화를 AI에 넘길 때는 쓰는 사람이 판단해야 합니다.
+
+### 안전 정지
+
+다음 경우 모든 전송을 멈춥니다(`safety_stop_active`).
+
+- 대화방 안내 문구에서 보호조치·이용제한이 감지된 경우
+- 확인되지 않은 전송이 2회 연속된 경우
+
+해제는 사람이 카카오톡 화면을 확인한 뒤 터미널에서 직접 합니다. MCP 도구로는 해제할 수 없고, 대화형 터미널이 아니면 명령이 거부됩니다.
+
+```powershell
+.venv\Scripts\kakaotalk-win reset-stop
+```
+
+### 설정
+
+```powershell
+kakaotalk-win config                                  # 현재 설정과 실제 적용 한도
+kakaotalk-win config --self-name "내 프로필 이름"
+kakaotalk-win config --limit per_hour=10 --limit per_day=30   # 더 엄격하게만 바꿀 수 있음
+kakaotalk-win config --confirm dialog                 # 매 전송 전 확인창 켜기
+kakaotalk-win config --confirm off                    # 확인창 끄기 (기본값, 대화형 터미널에서만)
+```
+
+한도는 설정으로 낮출 수만 있고 기본값보다 높일 수는 없습니다.
+확인창을 켜는 것은 언제든 되지만, 끄는 것(`--confirm off`)은 대화형 터미널에서 사람이 직접 입력해야 합니다.
+확인창이 꺼진 상태에서 MCP 클라이언트가 전송 도구를 '항상 허용'하면, 사람의 확인 없이 AI 판단만으로 전송됩니다.
+이 경우에도 전송 한도·같은 문구 반복 차단·새 방 금지·안전 정지는 그대로 적용됩니다.
+
+상태 파일(한도 기록, 전송 기록, 설정)은 `%LOCALAPPDATA%\kakaotalk-win`에 있습니다. `KAKAOTALK_WIN_STATE`로 위치를 바꿀 수 있습니다.
+
+## CLI
+
+```powershell
+kakaotalk-win status
+kakaotalk-win windows
+kakaotalk-win read --window-title "정확한 방 이름" --limit 50
+kakaotalk-win call read_many --args-file C:\absolute\path\args.json
+kakaotalk-win call send_message --args-file C:\absolute\path\request.json
+kakaotalk-win call send_result --args-file C:\absolute\path\result.json
+```
+
+`call`의 메서드와 JSON 인수는 Python API(`kakaotalk_win.operations.KakaoTalkWin`)와 같습니다.
+사용자 텍스트는 명령줄에 넣지 말고 JSON 파일(UTF-8)로 넘기세요.
+
+## 제한
+
+- 카카오톡이 업데이트되면 내부 창 이름이나 복사 형식이 바뀔 수 있습니다.
+  바뀌면 해당 기능이 `blocked`나 `unclassified`로 멈추고, 추측해서 동작하지 않습니다.
+- 확인한 환경은 카카오톡 PC 26.9.2(한국어 UI)와 Windows 11입니다.
+- 화면 배율(DPI)이 다른 모니터에서는 OCR 결과가 달라질 수 있습니다.
+- 카카오톡을 여러 개 실행했거나(멀티 프로필) 원격 데스크톱 안에서 쓰는 경우는 지원하지 않습니다.
+
+## 검증
+
+```powershell
+.venv\Scripts\python -m unittest discover -s tests -p "test_win_*.py" -v
+```
+
+단위 테스트는 가짜 카카오톡 창으로 전송 절차(중복 방지, 초안 보존, 한도, 안전 정지, 결과 재확인)를 검사합니다. 실제 카카오톡은 건드리지 않습니다.
