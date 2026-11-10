@@ -20,6 +20,7 @@ MCP가 연결돼 있지 않을 때는 `kakaotalk-win call METHOD --args-file C:\
    기본값은 열려 있는 대화창만 읽는다. 닫힌 방은 `notRead`에 미리보기와 안 읽은 개수(`unread`)만 나온다.
    닫힌 방 내용까지 필요하면 "방을 열면 읽음 처리된다"고 알리고 동의를 받은 뒤 `open_rooms=true`로 다시 부른다. 동의 없이 켜지 않는다.
    `listCoverage.complete=false`면 `list_pages`를 늘리고, 방별 `mayBeIncomplete=true`면 앞부분이 빠졌을 수 있다고 밝힌다.
+   목록 항목에 `previewUnreadable=true`가 있으면 미리보기 글자를 읽지 못한 것이다. 미리보기가 없다고 말하지 않는다.
 
 ## 읽고 찾기
 

@@ -227,13 +227,13 @@ class KakaoTalkWin:
         if ocr:
             page_rows, statuses, badges = [], [], []
             for path, listing in zip(paths, listings):
-                recognized = cap.ocr(path)
+                recognized = _ocr_list_page(path, listing, scale)
                 statuses.append(recognized.get("status"))
                 if recognized.get("status") == "ok":
                     rows = _rows_from_ocr(recognized.get("lines", []), listing, scale, last_page=path == paths[-1])
                     badges.append((listing, rows))
                     page_rows.append(rows)
-            _read_badge_numbers(badges)
+            _read_badge_numbers(badges, zoom=max(2, round(2 / scale)))  # smaller digits at lower system scales
             result["ocr"] = {"status": "ok" if statuses and all(s == "ok" for s in statuses) else
                              next((s for s in statuses if s != "ok"), "ocr_failed"), "engine": "Windows.Media.Ocr"}
             if page_rows:
@@ -241,7 +241,9 @@ class KakaoTalkWin:
                 result["total"] = len(result["items"])
         result["note"] = ("Names come from OCR and can contain recognition errors (icons may be read as a "
                           "leading character). Check the images; open_room needs the exact room name. "
-                          "hasUnread comes from the red badge colour; unread is the badge number when legible.")
+                          "hasUnread comes from the red badge colour; unread is the badge number when legible. "
+                          "previewUnreadable=true: the row shows a preview OCR could not read (often a one-word "
+                          "reply); read the room for its content.")
         return result
 
     def search_rooms(self, query, pages=1):
@@ -588,9 +590,14 @@ class KakaoTalkWin:
         older_seen = any(stamp and stamp < since for stamp in stamps[last + 1:])
         rooms, not_read, opened_here = [], [], []
         open_titles = [chat.title for chat in self._state().chats]
+        claimed = {name for row in rows for name in _row_names(row) if name in open_titles}
+        read_titles = set()
         for row in candidates[:max_rooms]:
             summary = {key: row.get(key) for key in ("name", "timeText", "preview", "hasUnread", "unread")}
-            title = _match_title(row, open_titles)
+            title = _match_title(row, open_titles, claimed)
+            if title in read_titles:  # two list rows resolved to one window: do not read or report it twice
+                not_read.append(dict(summary, reason="ambiguous_room_name"))
+                continue
             if title is None and open_rooms:
                 title, problem = self._open_listed_room(row)
                 if title is None:
@@ -601,6 +608,7 @@ class KakaoTalkWin:
             elif title is None:
                 not_read.append(dict(summary, reason="room_window_not_open"))
                 continue
+            read_titles.add(title)
             rooms.append(self._recent_in_room(title, row, since))
         cleanup = [self.close_room(title) for title in opened_here]
         return {"status": "ok", "source": SOURCE, "since": since.strftime("%Y-%m-%d %H:%M"), "minutes": minutes,
@@ -759,6 +767,25 @@ AVATAR_EDGE = 100   # text left of this x is inside the profile picture
 EDGE_MARGIN = 6     # a row this close to the top/bottom edge is cut off
 
 
+SMALL_SCALE = 0.9  # below this (system scale under 150%) list text is small enough to need help
+
+
+def _ocr_list_page(path, listing, scale):
+    """OCR one room-list capture. At small system scales the grey time labels are about 12px high
+    and half of them are misread; darkened and enlarged 2x (cubic) they read reliably. The saved
+    capture the caller returns stays untouched."""
+    if scale >= SMALL_SCALE:
+        return cap.ocr(path)
+    helper = cap.save_png(cap.darken(listing))
+    try:
+        return cap.ocr(helper, zoom=2)
+    finally:
+        try:
+            os.remove(helper)
+        except OSError:
+            pass
+
+
 def _capture_list_pages(window, listing, pages, scale):
     """Capture the list `pages` times, scrolling down by a page minus about a row in between.
 
@@ -786,15 +813,15 @@ def _capture_list_pages(window, listing, pages, scale):
     return captures, end_of_list, (True if scrolled else None)
 
 
-_TIMEISH = re.compile(r"^(?:(?:오전|오후) ?\d{1,2}:?\d{2}|\d{1,2}:\d{2} ?(?:AM|PM)|어제|Yesterday|"
+_TIMEISH = re.compile(r"^(?:(?:오전|오후) ?\d{1,2}[:•·.;]?\d{2}|\d{1,2}:\d{2} ?(?:AM|PM)|어제|Yesterday|"
                       r"\d{1,2}월 \d{1,2}일|\d{4}[.-] ?\d{1,2}[.-] ?\d{1,2}\.?|[월화수목금토일]요일)$")
-_KO_TIME = re.compile(r"(오전|오후) ?(\d{1,2}):?(\d{2})")
+_KO_TIME = re.compile(r"(오전|오후) ?(\d{1,2})[:•·.;]?(\d{2})")  # OCR reads the colon as • · . ; or drops it
 _UNREAD = re.compile(r"\d{1,3}\+?")
 RIGHT_COLUMN = 0.81  # fraction of the list width where the time / badge column starts
 
 
 def _clean_time(text):
-    """OCR often drops the colon ("오후 235"); put it back."""
+    """OCR often drops or misreads the colon ("오후 235", "오후 2•35"); put it back."""
     match = _KO_TIME.fullmatch(text)
     return f"{match[1]} {int(match[2])}:{match[3]}" if match else text
 
@@ -844,6 +871,26 @@ def _has_red_badge(image, top, bottom):
     if not image[2]:
         return None
     return _red_badge_box(image, top, bottom) is not None
+
+
+def _has_ink(image, left, top, right, bottom, minimum=12):
+    """True when a band holds text: enough pixels far from the band's most common (background) colour."""
+    width, height, data = image
+    if not data or right <= left or bottom <= top:
+        return False
+    samples = []
+    for y in range(max(0, top), min(height, bottom), 2):
+        for x in range(max(0, left), min(width, right), 2):
+            at = (y * width + x) * 4
+            samples.append(data[at:at + 3])
+    if not samples:
+        return False
+    counts = {}
+    for pixel in samples:
+        counts[pixel] = counts.get(pixel, 0) + 1
+    background = max(counts, key=counts.get)
+    ink = sum(1 for pixel in samples if max(abs(a - b) for a, b in zip(pixel, background)) > 80)
+    return ink >= minimum
 
 
 def _is_badge_red(blue, green, red):
@@ -986,7 +1033,7 @@ def _rows_from_ocr(lines, image, scale=1.0, last_page=True):
         else:
             clusters.append([line])
     rows = []
-    for cluster in clusters:
+    for number, cluster in enumerate(clusters):
         head = cluster[0]
         beside = sorted((line for line in cluster[1:] if abs(line["top"] - head["top"]) < line_height * 0.6),
                         key=lambda line: line["left"])
@@ -994,8 +1041,12 @@ def _rows_from_ocr(lines, image, scale=1.0, last_page=True):
         top, bottom = min(line["top"] for line in cluster), max(line["bottom"] for line in cluster)
         if top < EDGE_MARGIN * scale:
             continue
+        # The row's own extent, independent of what OCR found: a missed preview line must not
+        # shorten the area searched for the badge, which sits beside the preview.
+        next_top = min(line["top"] for line in clusters[number + 1]) if number + 1 < len(clusters) else height
+        row_end = int(min(top + ROW_PITCH * 0.8 * scale, next_top - 1, height))
         row = _clean_name(" ".join(line["text"].strip() for line in [head] + beside))
-        badge = _red_badge_box(image, top, bottom + line_height)
+        badge = _red_badge_box(image, int(top), row_end)
         row.update(preview=" ".join(line["text"].strip() for line in below) or None, timeText=None, unread=None,
                    hasUnread=(badge is not None) if image[2] else None, _top=top, _bottom=bottom)
         if badge:
@@ -1004,6 +1055,9 @@ def _rows_from_ocr(lines, image, scale=1.0, last_page=True):
             if not last_page:
                 continue
             row["partial"] = True
+        elif not below and _has_ink(image, int(AVATAR_EDGE * scale), int(bottom + 2),
+                                    int(width * RIGHT_COLUMN), row_end):
+            row["previewUnreadable"] = True  # a short preview ("넵") that OCR did not pick up
         rows.append(row)
     for mark in marks:
         center = (mark["top"] + mark["bottom"]) / 2
@@ -1188,14 +1242,25 @@ def _similar(ocr_name, title):
         return False
     if len(shown) >= 6 and real.startswith(shown):  # the list shortens long names with "…"
         return True
+    # Rooms often differ only by a number ("24기 모임" / "25기 모임", "1팀" / "2팀"): never treat
+    # names with different numbers as one room, however close the rest of the text is.
+    if re.findall(r"\d+", shown) != re.findall(r"\d+", real):
+        return False
     return difflib.SequenceMatcher(None, shown, real).ratio() >= 0.8
 
 
-def _match_title(row, titles):
-    """The exact title of an open chat window that a room-list row refers to, if exactly one fits."""
-    names = [row.get("name")] + list(row.get("nameVariants") or [])
+def _row_names(row):
+    return [row.get("name")] + list(row.get("nameVariants") or [])
+
+
+def _match_title(row, titles, claimed=()):
+    """The exact title of an open chat window that a room-list row refers to, if exactly one fits.
+
+    `claimed` holds titles another listed row names exactly; those are never matched loosely.
+    """
+    names = _row_names(row)
     for name in names:
         if name in titles:
             return name
-    close = {title for title in titles for name in names if _similar(name, title)}
+    close = {title for title in titles if title not in claimed for name in names if _similar(name, title)}
     return close.pop() if len(close) == 1 else None

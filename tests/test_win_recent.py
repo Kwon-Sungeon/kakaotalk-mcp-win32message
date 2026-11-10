@@ -54,6 +54,17 @@ class TitleMatchTests(unittest.TestCase):
         self.assertFalse(_similar("가", "가나다라마"))
         self.assertIsNone(_match_title({"name": "모임"}, ["모임 A", "모임 B"]))
 
+    def test_rooms_that_differ_by_a_number_are_different_rooms(self):
+        self.assertFalse(_similar("사진 동아리 24기 수다방", "사진 동아리 25기 수다방"))
+        self.assertFalse(_similar("등산 1팀", "등산 2팀"))
+        self.assertTrue(_similar("사진 동아리 24기 수다밤", "사진 동아리 24기 수다방"))
+        self.assertIsNone(_match_title({"name": "사진 동아리 25기 수다방"}, ["사진 동아리 24기 수다방"]))
+
+    def test_a_title_named_exactly_by_another_row_is_not_matched_loosely(self):
+        titles = ["주말 등산 모임"]
+        self.assertIsNone(_match_title({"name": "주말 등산 모입"}, titles, claimed={"주말 등산 모임"}))
+        self.assertEqual(_match_title({"name": "주말 등산 모임"}, titles, claimed={"주말 등산 모임"}), "주말 등산 모임")
+
 
 class SelectionStripTests(unittest.TestCase):
     def test_click_only_on_plain_background(self):
@@ -86,6 +97,58 @@ class BadgeTests(unittest.TestCase):
         self.assertIsNone(_badge_number(words, (125, 40, 150, 60), 100))
         self.assertIsNone(_badge_number([{"text": "0", "left": 30, "top": 20, "right": 36, "bottom": 32}],
                                         (125, 18, 150, 34), 100))
+
+
+class RoomRowTests(unittest.TestCase):
+    """One room row of a 150% capture, where OCR found the name and time but missed the preview."""
+
+    WIDTH, HEIGHT = 651, 220
+
+    def lines(self):
+        return [{"text": "주말 등산 모임", "left": 120, "top": 33, "right": 260, "bottom": 48,
+                 "words": [{"text": "주말", "left": 120, "top": 33, "right": 150, "bottom": 48}]},
+                {"text": "오후 2•26", "left": 550, "top": 33, "right": 618, "bottom": 46,
+                 "words": [{"text": "오후", "left": 550, "top": 33, "right": 580, "bottom": 46},
+                           {"text": "2•26", "left": 588, "top": 34, "right": 618, "bottom": 46}]}]
+
+    def test_badge_beside_a_missed_preview_is_found_whole(self):
+        image = paint(solid(self.WIDTH, self.HEIGHT, (255, 255, 255)), (593, 59, 618, 84), (107, 122, 255))
+        row = operations._rows_from_ocr(self.lines(), image, 1.0)[0]
+        self.assertTrue(row["hasUnread"])
+        self.assertEqual(row["badgeBox"], (593, 59, 618, 84))  # not cut at the name line
+        self.assertEqual(row["timeText"], "오후 2:26")
+        self.assertNotIn("previewUnreadable", row)
+
+    def test_unread_preview_text_is_flagged(self):
+        image = paint(solid(self.WIDTH, self.HEIGHT, (255, 255, 255)), (122, 62, 150, 78), (90, 90, 90))  # "넵"
+        row = operations._rows_from_ocr(self.lines(), image, 1.0)[0]
+        self.assertIsNone(row["preview"])
+        self.assertTrue(row["previewUnreadable"])
+
+    def test_ink_check(self):
+        blank = solid(200, 40, (255, 255, 255))
+        self.assertFalse(operations._has_ink(blank, 0, 0, 200, 40))
+        self.assertTrue(operations._has_ink(paint(blank, (20, 10, 60, 30), (60, 60, 60)), 0, 0, 200, 40))
+
+
+class SmallScaleOcrTests(unittest.TestCase):
+    def test_darken_turns_grey_text_black_and_keeps_white(self):
+        _, _, data = operations.cap.darken((2, 1, bytes((150, 150, 150, 255, 255, 255, 255, 255))))
+        self.assertEqual(data, bytes((0, 0, 0, 255, 255, 255, 255, 255)))
+
+    def test_zoomed_coordinates_are_divided_back(self):
+        line = {"text": "오후 2:26", "left": 244, "top": 66, "right": 300, "bottom": 92,
+                "words": {"text": "오후", "left": 244, "top": 66, "right": 270, "bottom": 92}}
+        scaled = operations.cap._unzoom(line, 2)
+        self.assertEqual((scaled["left"], scaled["top"], scaled["right"], scaled["bottom"]), (122, 33, 150, 46))
+        self.assertEqual(scaled["words"][0]["left"], 122)
+
+    def test_time_with_a_misread_colon(self):
+        for raw in ("오후 2•26", "오후 2·26", "오후 2.26", "오후 226"):
+            self.assertEqual(operations._clean_time(raw), "오후 2:26")
+            self.assertTrue(operations._TIMEISH.match(raw))
+        self.assertEqual(_row_time({"timeText": operations._clean_time("오후 2•12")}, NOW),
+                         NOW.replace(hour=14, minute=12))
 
 
 class FakeApp(KakaoTalkWin):
@@ -160,6 +223,19 @@ class RecentMessagesTests(unittest.TestCase):
         self.assertEqual(result["markedAsRead"], ["AB 프로젝트방"])
         self.assertEqual(app.closed, ["AB 프로젝트방"])
         self.assertEqual(result["notRead"], [])
+
+    def test_a_closed_room_is_never_read_from_a_look_alike_open_room(self):
+        listed = [{"name": "사진 동아리 25기 수다방", "timeText": label(3), "preview": "사진 올려요", "hasUnread": True},
+                  {"name": "사진 동아리 24기 수다방", "timeText": label(4), "preview": "좋아요", "hasUnread": False},
+                  {"name": "주말 등산 모입", "timeText": label(5), "preview": "출발", "hasUnread": False}]
+        messages = {"사진 동아리 24기 수다방": [message("좋아요", 4)], "주말 등산 모임": [message("출발", 5)]}
+        app = FakeApp(listed, ["사진 동아리 24기 수다방", "주말 등산 모임"], messages)
+        with patch.object(operations, "_clear_selection"):
+            result = app.recent_messages(minutes=60)
+        self.assertEqual([room["windowTitle"] for room in result["rooms"]],
+                         ["사진 동아리 24기 수다방", "주말 등산 모임"])
+        self.assertEqual([(row["name"], row["reason"]) for row in result["notRead"]],
+                         [("사진 동아리 25기 수다방", "room_window_not_open")])
 
     def test_selection_is_cleared_once_after_the_outermost_call(self):
         app = FakeApp(self.listed, ["주말 등산 모임"], self.messages)

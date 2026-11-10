@@ -128,7 +128,20 @@ $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($lang)
 $file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($env:KAKAOTALK_OCR_IMAGE)) ([Windows.Storage.StorageFile])
 $stream = Await ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
 $decoder = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
-$bitmap = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+$zoom = [int]$env:KAKAOTALK_OCR_ZOOM
+if ($zoom -gt 1) {
+  # Smooth (cubic) enlargement: small glyphs drawn at 100% scale are read far better at 2x.
+  $transform = New-Object Windows.Graphics.Imaging.BitmapTransform
+  $transform.ScaledWidth = $decoder.PixelWidth * $zoom
+  $transform.ScaledHeight = $decoder.PixelHeight * $zoom
+  $transform.InterpolationMode = [Windows.Graphics.Imaging.BitmapInterpolationMode]::Cubic
+  $bitmap = Await ($decoder.GetSoftwareBitmapAsync([Windows.Graphics.Imaging.BitmapPixelFormat]::Bgra8,
+    [Windows.Graphics.Imaging.BitmapAlphaMode]::Premultiplied, $transform,
+    [Windows.Graphics.Imaging.ExifOrientationMode]::IgnoreExifOrientation,
+    [Windows.Graphics.Imaging.ColorManagementMode]::DoNotColorManage)) ([Windows.Graphics.Imaging.SoftwareBitmap])
+} else {
+  $bitmap = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+}
 $result = Await ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
 $lines = foreach ($line in $result.Lines) {
   $xs = $line.Words | ForEach-Object { $_.BoundingRect }
@@ -147,13 +160,16 @@ $stream.Dispose()
 """
 
 
-def ocr(png_path, language="ko"):
+def ocr(png_path, language="ko", zoom=1):
     """Run the Windows built-in OCR engine (Windows.Media.Ocr) on a local PNG.
 
     Uses Windows PowerShell 5.1 to reach the WinRT API; no network, no extra install.
     Returns {"status": "ok", "lines": [{text, left, top, right, bottom, words: [{text, left, ...}]}, ...]}.
+    zoom > 1 enlarges the image (cubic) inside the decoder before recognition; the returned
+    coordinates are divided back, so they always refer to the PNG as saved.
     """
-    env = {**os.environ, "KAKAOTALK_OCR_IMAGE": str(Path(png_path).resolve()), "KAKAOTALK_OCR_LANG": language}
+    env = {**os.environ, "KAKAOTALK_OCR_IMAGE": str(Path(png_path).resolve()), "KAKAOTALK_OCR_LANG": language,
+           "KAKAOTALK_OCR_ZOOM": str(int(zoom))}
     try:
         result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
                                  "-Command", _OCR_SCRIPT], capture_output=True, timeout=30, env=env,
@@ -169,4 +185,27 @@ def ocr(png_path, language="ko"):
         return {"status": "ocr_failed", "detail": result.stderr.decode("utf-8", errors="replace")[-300:]}
     if isinstance(value.get("lines"), dict):
         value["lines"] = [value["lines"]]
+    if zoom > 1:
+        value["lines"] = [_unzoom(line, zoom) for line in value.get("lines") or []]
     return value
+
+
+def _unzoom(item, zoom):
+    scaled = dict(item, **{edge: int(item[edge] // zoom) for edge in ("left", "top", "right", "bottom")
+                           if isinstance(item.get(edge), (int, float))})
+    words = item.get("words")
+    if isinstance(words, dict):
+        words = [words]
+    if words:
+        scaled["words"] = [_unzoom(word, zoom) for word in words]
+    return scaled
+
+
+# Grey on white: everything at or below 150 becomes black, the rest is stretched up to white.
+_DARKEN = bytes(0 if value <= 150 else (value - 150) * 255 // 105 for value in range(256))
+
+
+def darken(image):
+    """Raise the contrast of grey text (time labels, previews) for OCR. Alpha 255 stays 255."""
+    width, height, data = image
+    return width, height, data.translate(_DARKEN)
