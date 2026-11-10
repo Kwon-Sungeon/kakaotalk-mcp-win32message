@@ -7,6 +7,7 @@ AI 에이전트가 Windows PC 카카오톡의 대화를 읽고, 찾고, 답장�
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![MCP](https://img.shields.io/badge/MCP-stdio-8A2BE2)
+[![Tests](https://github.com/Kwon-Sungeon/kakaotalk-mcp-win32message/actions/workflows/tests.yml/badge.svg)](https://github.com/Kwon-Sungeon/kakaotalk-mcp-win32message/actions/workflows/tests.yml)
 
 > [!WARNING]
 > 카카오와 관계없는 비공식 도구입니다. 카카오는 이용 환경과 이용 패턴 분석만으로도 보호조치를 할 수 있다고 고지합니다.
@@ -18,6 +19,7 @@ AI 에이전트가 Windows PC 카카오톡의 대화를 읽고, 찾고, 답장�
 Claude 같은 AI 클라이언트에 연결하여 카카오톡과 관련된 업무를 지시할 수 있습니다.
 
 - "프로젝트방에서 오늘 나온 결정 사항만 정리해 줘"
+- "최근 1시간 동안 온 카톡을 방별로 요약해 줘"
 - "지난주에 '견적' 얘기가 나온 부분을 찾아서 앞뒤 대화까지 보여 줘"
 - "안 읽은 방이 뭐가 있는지 알려 주고, 김 대리 방에는 '자료 확인했습니다'라고 답해 줘"
 - "이 방에 올라온 사진에 뭐가 적혀 있는지 확인해 줘"
@@ -44,7 +46,7 @@ PowerShell에서 실행합니다. 원하는 폴더에 가상 환경을 만들고
 
 ```powershell
 py -3 -m venv "$env:USERPROFILE\.kakaotalk-win"
-& "$env:USERPROFILE\.kakaotalk-win\Scripts\pip" install "https://github.com/Kwon-Sungeon/kakaotalk-mcp-win32message/releases/download/v0.1.0/kakaotalk_win-0.1.0-py3-none-any.whl"
+& "$env:USERPROFILE\.kakaotalk-win\Scripts\pip" install "https://github.com/Kwon-Sungeon/kakaotalk-mcp-win32message/releases/download/v0.1.1/kakaotalk_win-0.1.1-py3-none-any.whl"
 ```
 
 소스코드를 수정하려면 git 저장소를 받아 설치합니다.
@@ -106,13 +108,14 @@ Cursor, VS Code 등 다른 클라이언트도 같은 명령(`kakaotalk-win.exe m
 |---|---|---|
 | `kakaotalk_win_status` | 실행·잠금·서명 상태, 전송 한도, 경고 확인 | 없음 |
 | `kakaotalk_win_windows` | 열려 있는 대화창 목록과 초안 유무 | 없음 |
-| `kakaotalk_win_rooms` | 채팅 목록의 방 이름·미리보기·시각·안 읽음 표시 (화면 글자 인식, 여러 페이지) | 목록을 내렸다가 맨 위로 되돌림 |
+| `kakaotalk_win_rooms` | 채팅 목록의 방 이름·미리보기·시각·안 읽은 개수 (화면 글자 인식, 여러 페이지) | 목록을 내렸다가 맨 위로 되돌림 |
 | `kakaotalk_win_search_rooms` | 앱의 채팅방 검색으로 방 찾기 | 검색칸을 썼다가 되돌림 |
 | `kakaotalk_win_open` | 정확한 이름의 기존 방 열기 | 대화창 열림 |
 | `kakaotalk_win_close` | 대화창 닫기 (방 나가기 아님, 초안 있으면 중단) | 대화창 닫힘 |
 | `kakaotalk_win_read` | 메시지 읽기 (날짜·보낸 사람·시각·본문, 페이지 지원) | 없음 |
 | `kakaotalk_win_read_full_text` | 500자가 넘는 메시지의 전체 본문 읽기 ('전체보기') | 전체보기 창을 열었다가 닫음 |
 | `kakaotalk_win_read_many` | 방 최대 10개를 차례로 읽기 | 필요하면 열고 닫음 |
+| `kakaotalk_win_recent` | 최근 N분 동안 여러 방에 온 메시지를 한 번에 모으기 | 기본은 없음. `open_rooms=true`면 닫힌 방을 열었다가(읽음 처리) 다시 닫음 |
 | `kakaotalk_win_read_attachment` | 대화창을 이미지로 캡처해 사진·이모티콘 확인 | 없음 |
 | `kakaotalk_win_load_more` | 위로 스크롤해 이전 대화 불러오기 | 스크롤 후 원위치 |
 | `kakaotalk_win_search` | 불러온 대화에서 검색하고 앞뒤 맥락 함께 반환 | 없음 |
@@ -132,8 +135,9 @@ Cursor, VS Code 등 다른 클라이언트도 같은 명령(`kakaotalk-win.exe m
 
 대화창, 메시지 목록, 입력창이 각각 별도의 창으로 나뉘어 있어서, kakaotalk-win은 그 창을 찾아 필요한 동작을 직접 보냅니다.
 
-- **읽기**: 메시지 목록에 Ctrl+A, Ctrl+C를 보내면 카카오톡이 대화를 `[보낸 사람] [오후 3:05] 본문` 형식으로 클립보드에 복사합니다. 이 텍스트를 메시지 단위로 나눕니다. 방 하나에 0.1초가 채 걸리지 않습니다.
-- **방 목록**: 목록 창은 글자를 내주지 않아서 창을 캡처한 뒤 Windows에 들어 있는 OCR로 읽습니다. 목록을 한 화면씩 내려 가며 읽고, 끝나면 맨 위로 되돌립니다. 방을 열 때는 OCR 결과와 상관없이 앱의 검색으로 열고, 열린 창의 제목이 요청한 이름과 정확히 같은지 확인합니다.
+- **읽기**: 메시지 목록에 Ctrl+A, Ctrl+C를 보내면 카카오톡이 대화를 `[보낸 사람] [오후 3:05] 본문` 형식으로 클립보드에 복사합니다. 이 텍스트를 메시지 단위로 나눕니다. 방 하나에 0.1초가 채 걸리지 않습니다. 다 읽은 뒤에는 목록 맨 아래 빈 곳에 클릭 메시지를 보내 전체 선택 표시를 풉니다.
+- **방 목록**: 목록 창은 글자를 내주지 않아서 창을 캡처한 뒤 Windows에 들어 있는 OCR로 읽습니다. 목록을 한 화면씩 내려 가며 읽고, 끝나면 맨 위로 되돌립니다. 안 읽은 개수 배지는 빨간 원을 흰 바탕의 검은 숫자로 바꾸고 2배로 키워서 따로 읽습니다. 방을 열 때는 OCR 결과와 상관없이 앱의 검색으로 열고, 열린 창의 제목이 요청한 이름과 정확히 같은지 확인합니다.
+- **최근 메시지 모으기**: 방 목록의 시각으로 지정한 시간 안에 대화가 있었던 방을 고르고, 열려 있는 대화창만 읽어서 그 시각 이후 메시지만 돌려줍니다. 닫힌 방은 열면 읽음 처리되기 때문에 기본으로는 열지 않고 목록의 미리보기와 안 읽은 개수만 알려 줍니다.
 - **긴 메시지**: 카카오톡은 500자가 넘는 메시지를 앞 500자만 보여 줍니다. 메시지 아래 '전체보기' 위치에 클릭 메시지를 보내 열리는 창에서 전체 본문을 복사하고, 그 창을 바로 닫습니다. 마우스 커서는 움직이지 않습니다.
 - **전송**: 입력창에 글을 넣고, 다시 읽어서 똑같이 들어갔는지 확인한 뒤 Enter를 한 번만 보냅니다. 그다음 대화를 다시 읽어 새 메시지가 올라오고 입력창이 비었는지 확인합니다. 확인하지 못하면 다시 보내지 않고 `outcome_unknown`으로 알립니다.
 - **찾는 방식**: 창은 카카오톡 내부 이름(`ChatRoomListView_…` 등)으로 찾기 때문에 한국어·영어 UI에서 똑같이 동작합니다.
@@ -232,7 +236,7 @@ kakaotalk-win은 대화를 내 PC 밖으로 보내지 않고 저장하지도 않
 .venv\Scripts\python -m unittest discover -s tests -v
 ```
 
-단위 테스트는 가짜 카카오톡 창으로 전송 절차를 검사하며 실제 카카오톡은 건드리지 않습니다.
+단위 테스트는 가짜 카카오톡 창으로 전송 절차를 검사하며 실제 카카오톡은 건드리지 않습니다. GitHub에 코드를 올릴 때마다 GitHub Actions가 Windows에서 같은 테스트를 돌립니다.
 
 ```text
 src/kakaotalk_win/    구현 (Win32 호출은 ctypes만 사용)

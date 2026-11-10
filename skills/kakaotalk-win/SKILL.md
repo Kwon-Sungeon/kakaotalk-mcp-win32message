@@ -16,8 +16,10 @@ MCP가 연결돼 있지 않을 때는 `kakaotalk-win call METHOD --args-file C:\
 3. 닫혀 있는 방은 `kakaotalk_win_open`에 정확한 이름을 넣어 연다.
    이름이 확실하지 않으면 `kakaotalk_win_search_rooms`나 `kakaotalk_win_rooms`로 후보를 찾는다. 후보 이름은 화면 글자 인식 결과라 틀릴 수 있으니 사용자에게 맞는지 묻는다.
    이름이 같은 방이 여럿이면 그중 하나를 골라 진행하지 않는다.
-4. "최근 1시간에 온 카톡"처럼 여러 방의 새 대화를 물으면 `kakaotalk_win_rooms`에 `pages`를 주어 목록을 내려 가며 시각(`timeText`)과 `hasUnread`를 본다.
-   해당 시간대를 벗어나는 방이 나오거나 `endOfList=true`가 될 때까지 읽는다. 목록만 보는 것은 읽음 처리가 되지 않지만, 방을 열어 읽으면 읽음 처리된다는 점을 사용자에게 알린다.
+4. "최근 1시간에 온 카톡"처럼 여러 방의 새 대화를 물으면 `kakaotalk_win_recent`에 `minutes`를 주어 부른다.
+   기본값은 열려 있는 대화창만 읽는다. 닫힌 방은 `notRead`에 미리보기와 안 읽은 개수(`unread`)만 나온다.
+   닫힌 방 내용까지 필요하면 "방을 열면 읽음 처리된다"고 알리고 동의를 받은 뒤 `open_rooms=true`로 다시 부른다. 동의 없이 켜지 않는다.
+   `listCoverage.complete=false`면 `list_pages`를 늘리고, 방별 `mayBeIncomplete=true`면 앞부분이 빠졌을 수 있다고 밝힌다.
 
 ## 읽고 찾기
 

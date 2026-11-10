@@ -166,6 +166,21 @@ def kakaotalk_win_read_many(window_titles: list[str], limit: int = 50, open_if_n
     return _json(_app().read_many(window_titles, limit, open_if_needed, close_after))
 
 
+@mcp.tool(annotations=WINDOW)
+def kakaotalk_win_recent(minutes: int = 60, open_rooms: bool = False, list_pages: int = 3,
+                         max_rooms: int = 10) -> str:
+    """최근 minutes분(1~1440) 동안 여러 방에 온 메시지를 한 번에 모읍니다. "최근 1시간 카톡 요약해 줘" 같은 요청에 씁니다.
+
+    채팅 목록(list_pages 페이지, 열지 않고 읽음)의 시각으로 해당 시간대에 대화가 있었던 방을 고르고,
+    방마다 그 시간 이후의 메시지만 돌려줍니다. 방 이름은 열린 창 제목과 맞춰 정확한 이름으로 바꿉니다.
+    open_rooms=False(기본)면 이미 열려 있는 대화창만 읽고, 닫힌 방은 notRead에 미리보기와 함께 적습니다.
+    닫힌 방까지 읽으려면 사용자에게 '열면 읽음 처리된다'고 알리고 동의를 받은 뒤 open_rooms=True로 다시 부르세요.
+    그때 연 방은 markedAsRead에 나오고 끝나면 다시 닫힙니다.
+    listCoverage.complete=false면 목록을 끝까지 보지 못한 것이니 list_pages를 늘리세요.
+    """
+    return _json(_app().recent_messages(minutes, open_rooms, list_pages, max_rooms))
+
+
 @mcp.tool(annotations=SCROLL)
 def kakaotalk_win_load_more(window_title: str, pages: int = 1) -> str:
     """메시지 목록을 위로 올려 옛 메시지를 최대 pages번(1~10) 더 불러오고, 마지막에 맨 아래로 돌아갑니다.

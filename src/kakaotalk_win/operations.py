@@ -7,6 +7,8 @@
     read_messages   -> Ctrl+A/Ctrl+C on the message list, parsed (sender, time, date)
     read_attachment -> capture: PrintWindow PNG of the chat window (+ optional OCR)
     read_many       -> sequential reads (the clipboard is a single shared resource)
+    read_full_text  -> "전체보기" clicked with window messages, viewer copied and closed
+    recent_messages -> room list times + reads, filtered to the last N minutes
     load_more       -> WM_VSCROLL SB_PAGEUP (WM_MOUSEWHEEL fallback) on the list, view restored
     search_messages -> local search over the loaded messages
     send_message    -> composer EM_REPLACESEL + Enter, confirmed by re-reading (sender.py)
@@ -16,11 +18,14 @@ Every operation goes through the official app's own UI. Nothing talks to Kakao
 servers, reads Kakao's files or memory, or modifies the app.
 """
 
+import difflib
+import functools
 import json
 import os
 import re
 import subprocess
 import time
+from datetime import datetime, timedelta
 
 from . import capture as cap
 from . import checks as check
@@ -56,9 +61,34 @@ def _normalize(text):
     return text.replace("\r\n", "\n").replace("\r", "\n").strip()
 
 
+def _clears_selection(method):
+    """Reading selects every message (Ctrl+A) and the app keeps showing that highlight.
+
+    Public operations that copied a message list clear it once, when the outermost
+    call finishes, so the user does not find a fully selected chat afterwards.
+    """
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        self._depth += 1
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            self._depth -= 1
+            if not self._depth and self._selected:
+                pending, self._selected = self._selected, {}
+                for chat in pending.values():
+                    try:
+                        _clear_selection(chat)
+                    except Exception:  # cosmetic only; never fail the operation for it
+                        pass
+    return wrapper
+
+
 class KakaoTalkWin:
     def __init__(self):
         w.enable_dpi_awareness()
+        self._selected = {}  # hwnd -> chat window whose message list was select-all copied
+        self._depth = 0
 
     # ------------------------------------------------------------------ helpers
 
@@ -93,6 +123,7 @@ class KakaoTalkWin:
         raise RuntimeError(problem)
 
     def _copy(self, chat, pid):
+        self._selected[chat.hwnd] = chat
         return self._copy_text_of(chat.message_list, pid)
 
     def _read_items(self, chat, pid):
@@ -194,13 +225,15 @@ class KakaoTalkWin:
                   "scope": "captured_pages_only", "list": "search_results" if target == main.search_list else "chats",
                   "temporarilyShownMainWindow": shown is not None}
         if ocr:
-            page_rows, statuses = [], []
+            page_rows, statuses, badges = [], [], []
             for path, listing in zip(paths, listings):
                 recognized = cap.ocr(path)
                 statuses.append(recognized.get("status"))
                 if recognized.get("status") == "ok":
-                    page_rows.append(_rows_from_ocr(recognized.get("lines", []), listing, scale,
-                                                    last_page=path == paths[-1]))
+                    rows = _rows_from_ocr(recognized.get("lines", []), listing, scale, last_page=path == paths[-1])
+                    badges.append((listing, rows))
+                    page_rows.append(rows)
+            _read_badge_numbers(badges)
             result["ocr"] = {"status": "ok" if statuses and all(s == "ok" for s in statuses) else
                              next((s for s in statuses if s != "ok"), "ocr_failed"), "engine": "Windows.Media.Ocr"}
             if page_rows:
@@ -208,7 +241,7 @@ class KakaoTalkWin:
                 result["total"] = len(result["items"])
         result["note"] = ("Names come from OCR and can contain recognition errors (icons may be read as a "
                           "leading character). Check the images; open_room needs the exact room name. "
-                          "hasUnread comes from the red badge colour; unread is the OCR'd number when legible.")
+                          "hasUnread comes from the red badge colour; unread is the badge number when legible.")
         return result
 
     def search_rooms(self, query, pages=1):
@@ -217,6 +250,7 @@ class KakaoTalkWin:
 
     # ------------------------------------------------------------------ open / close
 
+    @_clears_selection
     def open_room(self, window_title, require_existing=True):
         """Open an existing room by exact name via the app's room search; never creates a room."""
         check.room(window_title)
@@ -302,6 +336,7 @@ class KakaoTalkWin:
 
     # ------------------------------------------------------------------ reading
 
+    @_clears_selection
     def read_messages(self, window_title, limit=50, offset=0, snapshot_id="", open_if_needed=False):
         """Messages loaded in an open chat window, paged from the newest end (oldest first within a page)."""
         check.room(window_title)
@@ -339,6 +374,7 @@ class KakaoTalkWin:
                              "oldestDate": dates[0] if dates else None},
                 "clipboard": info["restore"], "warnings": warnings, "elapsedMs": _elapsed_ms(began)}
 
+    @_clears_selection
     def read_many(self, window_titles, limit=50, open_if_needed=True, close_after=False):
         """Read up to 10 rooms in turn. Never in parallel: every read passes through the one clipboard."""
         check.rooms(window_titles, most=10)
@@ -363,6 +399,7 @@ class KakaoTalkWin:
                 "items": results, "total": len(results), "succeeded": ok_count,
                 "windowsOpened": newly_opened, "cleanup": closed, "elapsedMs": _elapsed_ms(began)}
 
+    @_clears_selection
     def load_more(self, window_title, pages=1):
         """Scroll the message list up so the app loads older messages, then go back to the bottom."""
         check.room(window_title)
@@ -402,6 +439,7 @@ class KakaoTalkWin:
                 "historyComplete": False, "endOfHistory": None,
                 "note": "No growth does not prove the start of the conversation was reached."}
 
+    @_clears_selection
     def search_messages(self, window_title, query, limit=100, load_pages=0, case_sensitive=False, context_rows=2):
         """Substring search over sender and text of the loaded messages, with neighbours for context."""
         check.room(window_title)
@@ -435,6 +473,7 @@ class KakaoTalkWin:
 
     # ------------------------------------------------------------------ long messages ("전체보기")
 
+    @_clears_selection
     def read_full_text(self, window_title, max_messages=3, scroll_pages=10):
         """Full text of loaded messages that the app shortens to their first 500 characters.
 
@@ -520,6 +559,96 @@ class KakaoTalkWin:
             while w.user32.IsWindow(viewer) and time.monotonic() < deadline:
                 time.sleep(0.05)
 
+    # ------------------------------------------------------------------ recent messages across rooms
+
+    @_clears_selection
+    def recent_messages(self, minutes=60, open_rooms=False, list_pages=3, max_rooms=10):
+        """Messages of the last `minutes` across rooms.
+
+        The room list (newest first, read by OCR without opening anything) decides which
+        rooms had activity in the window. Rooms whose chat window is already open are read
+        and filtered by message time. Closed rooms are only listed under notRead unless
+        open_rooms=True: then they are opened through the app's room search (which marks
+        their messages as read), read, and closed again.
+        """
+        check.number(minutes, "minutes", 1, 1440)
+        check.flag(open_rooms, "open_rooms")
+        check.number(list_pages, "list_pages", 1, 10)
+        check.number(max_rooms, "max_rooms", 1, 20)
+        began, now = time.monotonic(), datetime.now()
+        since = now - timedelta(minutes=minutes)
+        listing = self.rooms(pages=list_pages)
+        if listing.get("status") != "ok" or "items" not in listing:
+            return listing if listing.get("status") != "ok" else _blocked("room_list_unreadable", ocr=listing.get("ocr"))
+        rows = listing["items"]
+        stamps = [_row_time(row, now) for row in rows]
+        last = max((at for at, stamp in enumerate(stamps) if stamp and stamp >= since - timedelta(minutes=1)),
+                   default=-1)
+        candidates = rows[:last + 1]  # the list is newest first, so rows above an in-window row are in it too
+        older_seen = any(stamp and stamp < since for stamp in stamps[last + 1:])
+        rooms, not_read, opened_here = [], [], []
+        open_titles = [chat.title for chat in self._state().chats]
+        for row in candidates[:max_rooms]:
+            summary = {key: row.get(key) for key in ("name", "timeText", "preview", "hasUnread", "unread")}
+            title = _match_title(row, open_titles)
+            if title is None and open_rooms:
+                title, problem = self._open_listed_room(row)
+                if title is None:
+                    not_read.append(dict(summary, reason=problem))
+                    continue
+                opened_here.append(title)
+                open_titles.append(title)
+            elif title is None:
+                not_read.append(dict(summary, reason="room_window_not_open"))
+                continue
+            rooms.append(self._recent_in_room(title, row, since))
+        cleanup = [self.close_room(title) for title in opened_here]
+        return {"status": "ok", "source": SOURCE, "since": since.strftime("%Y-%m-%d %H:%M"), "minutes": minutes,
+                "rooms": rooms, "notRead": not_read, "roomsSkippedOverLimit": max(0, len(candidates) - max_rooms),
+                "markedAsRead": opened_here, "cleanup": cleanup,
+                "listCoverage": {"pagesCaptured": listing.get("pagesCaptured"), "endOfList": listing.get("endOfList"),
+                                 "reachedOlderRooms": older_seen,
+                                 "complete": bool(older_seen or listing.get("endOfList"))},
+                "elapsedMs": _elapsed_ms(began)}
+
+    def _open_listed_room(self, row):
+        """Open a room named by OCR: exact name, then variants, then the search's top hit if it is close."""
+        names = [row["name"]] + list(row.get("nameVariants") or [])
+        problem = "room_not_found"
+        for name in names:
+            opened = self.open_room(name, require_existing=False)
+            if opened.get("status") == "ok":
+                return name, None
+            problem = opened.get("reason") or problem
+            other = opened.get("openedTitle")
+            if opened.get("reason") == "search_top_result_mismatch" and other and _similar(name, other):
+                again = self.open_room(other, require_existing=False)
+                if again.get("status") == "ok":
+                    return other, None
+                problem = again.get("reason") or problem
+            if problem in ("open_rate_limit", "kakaotalk_locked", "main_window_not_found"):
+                break
+        return None, problem
+
+    def _recent_in_room(self, title, row, since):
+        read = self.read_messages(title, limit=500)
+        if read.get("status") != "ok":
+            return {"windowTitle": title, "status": read.get("status"), "reason": read.get("reason")}
+        loads = 0
+        while loads < 2 and _oldest_time(read["items"]) and _oldest_time(read["items"]) > since:
+            more = self.load_more(title, 1)
+            loads += 1
+            if more.get("status") != "ok" or not more.get("contentChanged"):
+                break
+            read = self.read_messages(title, limit=500)
+        fresh = [item for item in read["items"]
+                 if item["kind"] in MESSAGE_KINDS and _item_time(item) and _item_time(item) >= since]
+        oldest = _oldest_time(read["items"])
+        return {"windowTitle": title, "status": "ok", "listName": row.get("name"), "messages": fresh,
+                "total": len(fresh), "olderPagesLoaded": loads,
+                "mayBeIncomplete": bool(oldest and oldest > since),
+                "truncatedMessages": sum(bool(item.get("textTruncated")) for item in fresh)}
+
     # ------------------------------------------------------------------ capture (attachments, emoticons)
 
     def capture(self, window_title, output_path=None, ocr=False):
@@ -553,10 +682,12 @@ class KakaoTalkWin:
         from .sender import SendEngine  # imported late: sender imports this module's helpers
         return SendEngine(self)
 
+    @_clears_selection
     def send_message(self, window_title, text, operation_id, wait_seconds=8, require_self=False):
         """One journaled send into an existing room (see sender.py for the full procedure)."""
         return self._sender().send(window_title, text, operation_id, wait_seconds, require_self)
 
+    @_clears_selection
     def send_result(self, operation_id, wait_seconds=0):
         """Journal lookup for an earlier send; re-checks by reading only and never types again."""
         return self._sender().recheck(operation_id, wait_seconds)
@@ -709,18 +840,120 @@ def _clean_name(raw):
 
 
 def _has_red_badge(image, top, bottom):
-    """True when the right edge of a row holds the red unread badge (OCR often misreads its number)."""
+    """True when the right edge of a row holds the red unread badge."""
+    if not image[2]:
+        return None
+    return _red_badge_box(image, top, bottom) is not None
+
+
+def _is_badge_red(blue, green, red):
+    return red >= 200 and green <= 150 and blue <= 150 and red - green >= 80
+
+
+def _red_badge_box(image, top, bottom):
+    """Bounding box (left, top, right, bottom) of the red unread badge at a row's right edge, or None."""
     width, height, data = image
     if not data:
         return None
-    red = 0
-    for y in range(max(0, top), min(height, bottom), 2):
-        row = data[(y * width + int(width * 0.8)) * 4:(y * width + width) * 4]
-        for at in range(0, len(row) - 3, 8):
-            blue, green, red_value = row[at], row[at + 1], row[at + 2]
-            if red_value >= 200 and green <= 150 and blue <= 150 and red_value - green >= 80:
-                red += 1
-    return red >= 12
+    start = int(width * 0.8)
+    xs, ys = [], []
+    for y in range(max(0, top), min(height, bottom)):
+        row = data[(y * width + start) * 4:(y * width + width) * 4]
+        for at in range(0, len(row) - 3, 4):
+            if _is_badge_red(row[at], row[at + 1], row[at + 2]):
+                xs.append(start + at // 4)
+                ys.append(y)
+    if len(xs) < 40:
+        return None
+    return min(xs), min(ys), max(xs) + 1, max(ys) + 1
+
+
+BADGE_STRIP = 0.75  # the badge column (with the time labels above each badge) starts here
+
+
+def _ink_badges(image, boxes):
+    """Copy of a page where each red badge is redrawn as dark digits on white.
+
+    Windows OCR reads the white-on-red circle as "0", and it finds nothing at all in
+    an image holding only bare digits. Redrawn in place, the digits sit under the
+    time labels like ordinary text and are read reliably.
+    """
+    width, height, data = image
+    pixels = bytearray(data)
+    for left, top, right, bottom in boxes:
+        xs = range(max(0, left - 2), min(width, right + 2))
+        for y in range(max(0, top - 2), min(height, bottom + 2)):
+            row = {x: data[(y * width + x) * 4:(y * width + x) * 4 + 3] for x in xs}
+            red = [x for x in xs if _is_badge_red(*row[x])]
+            for x in xs:
+                blue, green, red_value = row[x]
+                at = (y * width + x) * 4
+                if not red or x < red[0] or x > red[-1] or _is_badge_red(blue, green, red_value):
+                    pixels[at:at + 3] = b"\xff\xff\xff"  # outside the circle, or its red fill
+                else:  # the white digit, anti-aliased edges included, becomes ink
+                    ink = max(0, min(255, (min(green, blue) - 120) * 255 // 135))
+                    pixels[at:at + 3] = bytes((255 - ink,) * 3)
+    return width, height, bytes(pixels)
+
+
+def _badge_number(words, box, offset):
+    """Digits of the OCR words that lie on a badge box (word x is relative to the strip at `offset`)."""
+    left, top, right, bottom = box
+    found = sorted((word for word in words
+                    if word["left"] + offset < right and word["right"] + offset > left
+                    and word["top"] < bottom and word["bottom"] > top), key=lambda word: word["left"])
+    digits = re.sub(r"[^0-9+]", "", "".join(word["text"] for word in found).replace("O", "0").replace("o", "0"))
+    return digits if _UNREAD.fullmatch(digits) and not digits.startswith("0") else None
+
+
+def _enlarge(image, zoom):
+    """Nearest-neighbour enlargement. Short numbers such as "1" are read far more reliably at 2x."""
+    width, height, data = image
+    rows = []
+    for y in range(height):
+        line = data[y * width * 4:(y + 1) * width * 4]
+        wide = b"".join(line[x * 4:x * 4 + 4] * zoom for x in range(width))
+        rows.append(wide * zoom)
+    return width * zoom, height * zoom, b"".join(rows)
+
+
+def _ocr_words(image, language, zoom):
+    """OCR words of an image, with coordinates divided back to the original size."""
+    path = cap.save_png(image)
+    try:
+        lines = cap.ocr(path, language).get("lines", [])
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    words = []
+    for line in lines:
+        line_words = line.get("words") or [line]
+        for word in [line_words] if isinstance(line_words, dict) else line_words:
+            words.append(dict(word, **{edge: word[edge] / zoom for edge in ("left", "top", "right", "bottom")}))
+    return words
+
+
+def _read_badge_numbers(pages, zoom=2):
+    """Fill `unread` from the red badges: the badge column of each page with badges, OCR'd at 2x.
+
+    Badges the Korean pass leaves unread get one English pass; the two engines miss different digits.
+    """
+    for listing, rows in pages:
+        slots = [(row, row.pop("badgeBox")) for row in rows if row.get("badgeBox")]
+        if not slots:
+            continue
+        width, height, _ = listing
+        offset = int(width * BADGE_STRIP)
+        strip = _enlarge(cap.crop(_ink_badges(listing, [box for _, box in slots]), (offset, 0, width, height)), zoom)
+        for language in ("ko", "en"):
+            words = _ocr_words(strip, language, zoom)
+            for row, box in slots:
+                if not row.get("unread"):
+                    row["unread"] = _badge_number(words, box, offset)
+            if all(row.get("unread") for row, _ in slots):
+                break
 
 
 def _rows_from_ocr(lines, image, scale=1.0, last_page=True):
@@ -762,8 +995,11 @@ def _rows_from_ocr(lines, image, scale=1.0, last_page=True):
         if top < EDGE_MARGIN * scale:
             continue
         row = _clean_name(" ".join(line["text"].strip() for line in [head] + beside))
+        badge = _red_badge_box(image, top, bottom + line_height)
         row.update(preview=" ".join(line["text"].strip() for line in below) or None, timeText=None, unread=None,
-                   hasUnread=_has_red_badge(image, top, bottom + line_height), _top=top, _bottom=bottom)
+                   hasUnread=(badge is not None) if image[2] else None, _top=top, _bottom=bottom)
+        if badge:
+            row["badgeBox"] = badge  # read by _read_badge_numbers, then removed
         if bottom > height - EDGE_MARGIN * scale or (not below and top > height - ROW_PITCH * 0.6 * scale):
             if not last_page:
                 continue
@@ -863,3 +1099,103 @@ def _match_shortened(targets, found, full, sender):
         if shown and whole.startswith(shown):
             return item
     return None
+
+
+# ---------------------------------------------------------------------- clearing the select-all highlight
+
+def _plain_strip(image, left, top, width, height):
+    """True when the strip just above the bottom edge of the message list is empty background.
+
+    Background means: every sampled pixel across the middle of the strip has the
+    same colour as the list's left edge on that row. A message bubble, photo,
+    link card or "new message" bar there fails the test, and nothing is clicked.
+    """
+    image_width, image_height, data = image
+
+    def pixel(x, y):
+        at = (y * image_width + x) * 4
+        return data[at:at + 3]
+
+    for y in range(top + height - 6, top + height - 1):
+        if not 0 <= y < image_height:
+            return False
+        background = pixel(left + 3, y)
+        for x in range(left + int(width * 0.1), left + int(width * 0.9), 3):
+            if any(abs(a - b) > 6 for a, b in zip(pixel(x, y), background)):
+                return False
+    return True
+
+
+def _clear_selection(chat):
+    """Click the empty strip under the newest message to drop the Ctrl+A highlight."""
+    if not w.user32.IsWindow(chat.message_list) or w.user32.IsIconic(chat.hwnd):
+        return False
+    image = cap.grab(chat.hwnd)
+    with w.window_dpi(chat.hwnd):
+        window_left, window_top, _, _ = w.rect(chat.hwnd)
+        left, top, right, bottom = w.rect(chat.message_list)
+    width, height = right - left, bottom - top
+    if not _plain_strip(image, left - window_left, top - window_top, width, height):
+        return False
+    with w.window_dpi(chat.hwnd):
+        w.post_click(chat.message_list, width // 2, height - 4)
+    return True
+
+
+# ---------------------------------------------------------------------- recent messages helpers
+
+_EN_TIME = re.compile(r"(\d{1,2}):(\d{2}) ?(AM|PM)", re.IGNORECASE)
+
+
+def _row_time(row, now):
+    """Latest moment a room-list time label can mean (today's time, or the end of an earlier day)."""
+    text = (row.get("timeText") or "").strip()
+    if not text:
+        return None
+    ko, en = _KO_TIME.fullmatch(text), _EN_TIME.fullmatch(text)
+    if ko or en:
+        hour, minute = (int(ko[2]), int(ko[3])) if ko else (int(en[1]), int(en[2]))
+        afternoon = (ko and ko[1] == "오후") or (en and en[3].upper() == "PM")
+        hour = hour % 12 + (12 if afternoon else 0)
+        if hour > 23 or minute > 59:
+            return None
+        return now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    end_of_yesterday = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(seconds=1)
+    if text in ("어제", "Yesterday"):
+        return end_of_yesterday
+    return end_of_yesterday - timedelta(days=1)  # a weekday or a date: older than yesterday
+
+
+def _item_time(item):
+    try:
+        return datetime.strptime(f"{item.get('date')} {item.get('time')}", "%Y-%m-%d %H:%M")
+    except (TypeError, ValueError):
+        return None
+
+
+def _oldest_time(items):
+    return next((_item_time(item) for item in items if _item_time(item)), None)
+
+
+def _comparable(name):
+    return re.sub(r"[\s.…]+$", "", (name or "").strip()).casefold()
+
+
+def _similar(ocr_name, title):
+    """An OCR'd room name and a real title that differ only by recognition errors or truncation."""
+    shown, real = _comparable(ocr_name), _comparable(title)
+    if not shown or not real:
+        return False
+    if len(shown) >= 6 and real.startswith(shown):  # the list shortens long names with "…"
+        return True
+    return difflib.SequenceMatcher(None, shown, real).ratio() >= 0.8
+
+
+def _match_title(row, titles):
+    """The exact title of an open chat window that a room-list row refers to, if exactly one fits."""
+    names = [row.get("name")] + list(row.get("nameVariants") or [])
+    for name in names:
+        if name in titles:
+            return name
+    close = {title for title in titles for name in names if _similar(name, title)}
+    return close.pop() if len(close) == 1 else None

@@ -1,0 +1,180 @@
+import sys
+import unittest
+from datetime import datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import patch
+
+if sys.platform != "win32":
+    raise unittest.SkipTest("kakaotalk_win requires Windows")
+
+from kakaotalk_win import operations  # noqa: E402
+from kakaotalk_win.operations import (KakaoTalkWin, _badge_number, _ink_badges, _match_title,  # noqa: E402
+                                      _plain_strip, _red_badge_box, _row_time, _similar)
+
+NOW = datetime(2026, 11, 10, 14, 20)
+
+
+def solid(width, height, bgr):
+    return width, height, bytes(bytes(bgr) + b"\x00") * (width * height)
+
+
+def paint(image, box, bgr):
+    width, height, data = image
+    pixels = bytearray(data)
+    for y in range(box[1], box[3]):
+        for x in range(box[0], box[2]):
+            pixels[(y * width + x) * 4:(y * width + x) * 4 + 3] = bytes(bgr)
+    return width, height, bytes(pixels)
+
+
+class RowTimeTests(unittest.TestCase):
+    def test_labels(self):
+        self.assertEqual(_row_time({"timeText": "오후 2:12"}, NOW), NOW.replace(hour=14, minute=12))
+        self.assertEqual(_row_time({"timeText": "오전 12:05"}, NOW), NOW.replace(hour=0, minute=5))
+        self.assertEqual(_row_time({"timeText": "오후 12:30"}, NOW), NOW.replace(hour=12, minute=30))
+        self.assertEqual(_row_time({"timeText": "2:12 PM"}, NOW), NOW.replace(hour=14, minute=12))
+        self.assertEqual(_row_time({"timeText": "어제"}, NOW), datetime(2026, 11, 9, 23, 59, 59))
+        self.assertLess(_row_time({"timeText": "11월 7일"}, NOW), datetime(2026, 11, 9))
+        self.assertIsNone(_row_time({"timeText": None}, NOW))
+
+
+class TitleMatchTests(unittest.TestCase):
+    TITLES = ["주말 등산 모임", "AB 프로젝트방", "사진 동아리 공지방 2026년 가을 정기 출사 안내"]
+
+    def test_exact_variant_truncated_and_misread(self):
+        self.assertEqual(_match_title({"name": "주말 등산 모임"}, self.TITLES), "주말 등산 모임")
+        self.assertEqual(_match_title({"name": "OAB 프로젝트방", "nameVariants": ["AB 프로젝트방"]}, self.TITLES),
+                         "AB 프로젝트방")
+        self.assertEqual(_match_title({"name": "사진 동아리 공지방 2026년 가을…"}, self.TITLES),
+                         "사진 동아리 공지방 2026년 가을 정기 출사 안내")
+        self.assertEqual(_match_title({"name": "주말 등산 모입"}, self.TITLES), "주말 등산 모임")
+        self.assertIsNone(_match_title({"name": "전혀 다른 방"}, self.TITLES))
+
+    def test_short_or_ambiguous_names_do_not_match(self):
+        self.assertFalse(_similar("가", "가나다라마"))
+        self.assertIsNone(_match_title({"name": "모임"}, ["모임 A", "모임 B"]))
+
+
+class SelectionStripTests(unittest.TestCase):
+    def test_click_only_on_plain_background(self):
+        background = solid(200, 100, (240, 220, 190))
+        self.assertTrue(_plain_strip(background, 0, 0, 200, 100))
+        bubble = paint(background, (40, 90, 180, 100), (0, 230, 255))
+        self.assertFalse(_plain_strip(bubble, 0, 0, 200, 100))
+        self.assertFalse(_plain_strip(background, 0, 50, 200, 100))  # strip outside the capture
+
+
+class BadgeTests(unittest.TestCase):
+    def test_badge_box_and_ink(self):
+        image = paint(solid(100, 40, (255, 255, 255)), (85, 10, 97, 30), (97, 111, 255))
+        image = paint(image, (90, 15, 92, 25), (255, 255, 255))  # a white "1" inside the badge
+        box = _red_badge_box(image, 0, 40)
+        self.assertEqual(box, (85, 10, 97, 30))
+        width, height, data = _ink_badges(image, [box])
+        black = sum(1 for at in range(0, len(data), 4) if data[at] == 0)
+        self.assertEqual(black, 2 * 10)  # only the digit became ink; the red fill turned white
+        red = sum(1 for at in range(0, len(data), 4) if operations._is_badge_red(*data[at:at + 3]))
+        self.assertEqual(red, 0)
+        self.assertIsNone(_red_badge_box(solid(100, 40, (255, 255, 255)), 0, 40))
+
+    def test_badge_number_from_words_on_the_box(self):
+        words = [{"text": "오후", "left": 0, "top": 0, "right": 20, "bottom": 10},
+                 {"text": "1", "left": 30, "top": 20, "right": 36, "bottom": 32},
+                 {"text": "0", "left": 37, "top": 20, "right": 43, "bottom": 32},
+                 {"text": "7", "left": 30, "top": 80, "right": 36, "bottom": 92}]
+        self.assertEqual(_badge_number(words, (125, 18, 150, 34), 100), "10")
+        self.assertIsNone(_badge_number(words, (125, 40, 150, 60), 100))
+        self.assertIsNone(_badge_number([{"text": "0", "left": 30, "top": 20, "right": 36, "bottom": 32}],
+                                        (125, 18, 150, 34), 100))
+
+
+class FakeApp(KakaoTalkWin):
+    """recent_messages over a fictional app: three listed rooms, two of them open."""
+
+    def __init__(self, rooms, open_titles, messages):
+        self._selected, self._depth = {}, 0
+        self.listed, self.open_titles, self.messages = rooms, list(open_titles), messages
+        self.opened, self.closed = [], []
+
+    def rooms(self, query="", ocr=True, output_path=None, pages=1):
+        return {"status": "ok", "items": self.listed, "pagesCaptured": pages, "endOfList": False}
+
+    def _state(self):
+        return SimpleNamespace(chats=[SimpleNamespace(title=title) for title in self.open_titles])
+
+    def open_room(self, window_title, require_existing=True):
+        self.opened.append(window_title)
+        if window_title == "AB 프로젝트":
+            return {"status": "blocked", "reason": "search_top_result_mismatch", "openedTitle": "AB 프로젝트방"}
+        if window_title in self.messages:
+            self.open_titles.append(window_title)
+            return {"status": "ok"}
+        return {"status": "blocked", "reason": "room_not_found"}
+
+    def close_room(self, window_title):
+        self.closed.append(window_title)
+        return {"status": "ok", "windowTitle": window_title}
+
+    def read_messages(self, window_title, limit=50, offset=0, snapshot_id="", open_if_needed=False):
+        return {"status": "ok", "items": self.messages[window_title]}
+
+    def load_more(self, window_title, pages=1):
+        return {"status": "ok", "contentChanged": False}
+
+
+def message(text, minutes_ago, sender="김철수"):
+    moment = datetime.now() - timedelta(minutes=minutes_ago)
+    return {"kind": "text", "sender": sender, "text": text, "date": moment.strftime("%Y-%m-%d"),
+            "time": moment.strftime("%H:%M")}
+
+
+def label(minutes_ago):
+    moment = datetime.now() - timedelta(minutes=minutes_ago)
+    return f"{'오후' if moment.hour >= 12 else '오전'} {moment.hour % 12 or 12}:{moment.minute:02d}"
+
+
+class RecentMessagesTests(unittest.TestCase):
+    def setUp(self):
+        self.listed = [{"name": "주말 등산 모입", "timeText": label(5), "preview": "좋아요", "hasUnread": True},
+                       {"name": "AB 프로젝트", "timeText": label(20), "preview": "네", "hasUnread": False},
+                       {"name": "오래된 방", "timeText": "어제", "preview": "옛날", "hasUnread": False}]
+        self.messages = {"주말 등산 모임": [message("지난주 사진", 200), message("토요일 7시 출발", 5)],
+                         "AB 프로젝트방": [message("자료 올렸어요", 20, "이영희")]}
+
+    def test_only_open_rooms_by_default(self):
+        app = FakeApp(self.listed, ["주말 등산 모임"], self.messages)
+        with patch.object(operations, "_clear_selection"):
+            result = app.recent_messages(minutes=60)
+        self.assertEqual([room["windowTitle"] for room in result["rooms"]], ["주말 등산 모임"])
+        self.assertEqual([m["text"] for m in result["rooms"][0]["messages"]], ["토요일 7시 출발"])
+        self.assertEqual([(row["name"], row["reason"]) for row in result["notRead"]],
+                         [("AB 프로젝트", "room_window_not_open")])
+        self.assertEqual(app.opened, [])
+        self.assertTrue(result["listCoverage"]["complete"])
+
+    def test_open_rooms_follows_a_close_search_hit_and_closes_it_again(self):
+        app = FakeApp(self.listed, ["주말 등산 모임"], self.messages)
+        with patch.object(operations, "_clear_selection"):
+            result = app.recent_messages(minutes=60, open_rooms=True)
+        self.assertEqual([room["windowTitle"] for room in result["rooms"]], ["주말 등산 모임", "AB 프로젝트방"])
+        self.assertEqual(result["markedAsRead"], ["AB 프로젝트방"])
+        self.assertEqual(app.closed, ["AB 프로젝트방"])
+        self.assertEqual(result["notRead"], [])
+
+    def test_selection_is_cleared_once_after_the_outermost_call(self):
+        app = FakeApp(self.listed, ["주말 등산 모임"], self.messages)
+        chat = SimpleNamespace(hwnd=1)
+        original = app.read_messages
+
+        def reading(*args, **kwargs):
+            app._selected[1] = chat
+            return original(*args, **kwargs)
+        app.read_messages = reading
+        with patch.object(operations, "_clear_selection") as clear:
+            app.recent_messages(minutes=60)
+        clear.assert_called_once_with(chat)
+        self.assertEqual(app._selected, {})
+
+
+if __name__ == "__main__":
+    unittest.main()

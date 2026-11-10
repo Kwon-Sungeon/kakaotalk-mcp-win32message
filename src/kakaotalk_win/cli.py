@@ -6,7 +6,8 @@ import sys
 from pathlib import Path
 
 METHODS = ("status", "windows", "rooms", "search_rooms", "open_room", "close_room", "read_messages",
-           "read_many", "load_more", "search_messages", "read_full_text", "capture", "send_message", "send_result")
+           "read_many", "load_more", "search_messages", "read_full_text", "recent_messages", "capture",
+           "send_message", "send_result")
 SUCCESS = frozenset({"ok", "partial", "observed_in_window"})
 
 

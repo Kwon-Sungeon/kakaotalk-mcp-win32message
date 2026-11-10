@@ -15,7 +15,7 @@ Windows의 공식 카카오톡 PC 앱을 **창 메시지(Win32)**로 조작하�
 | 대상 | 찾는 방법 | 쓰는 동작 |
 |---|---|---|
 | 대화창 | `EVA_Window_Dblclk` 최상위 창. 제목이 방 이름 | 목록, 닫기 (`WM_CLOSE`) |
-| 메시지 목록 | `EVA_VH_ListControl_Dblclk` | Ctrl+A, Ctrl+C를 창에 직접 보냄 → 클립보드 텍스트 파싱 |
+| 메시지 목록 | `EVA_VH_ListControl_Dblclk` | Ctrl+A, Ctrl+C를 창에 직접 보냄 → 클립보드 텍스트 파싱 → 맨 아래 빈 곳 클릭 메시지로 선택 해제 |
 | 입력창 | `RICHEDIT50W` | `EM_REPLACESEL`로 입력 → Enter 한 번 |
 | 채팅방 검색칸 | 메인 창 `ChatRoomListView_*` 아래 `Edit` | 방 이름 입력 + Enter (기존 방 열기) |
 | 채팅방 목록 | `ChatRoomListCtrl_*` (텍스트 API 없음) | `PrintWindow` 캡처 + Windows 내장 OCR |
@@ -74,6 +74,7 @@ Claude Code에서는 `claude mcp add kakaotalk-win -- "C:\...\.venv\Scripts\kaka
 | 사진 읽기 | `kakaotalk_win_read_attachment` | `capture` | 대화창 캡처(PNG) + 선택적 OCR |
 | 긴 메시지 전체 | `kakaotalk_win_read_full_text` | `read_full_text` | '전체보기' 위치에 클릭 메시지 → 열린 창에서 Ctrl+A/C → `WM_CLOSE` |
 | 여러 방 읽기 | `kakaotalk_win_read_many` | `read_many` | 순차 (클립보드가 하나) |
+| 최근 메시지 | `kakaotalk_win_recent` | `recent_messages` | 목록 시각으로 방 고르기 → 열린 창 읽기 → 시각으로 거르기 (아래 "최근 메시지 모으기" 참고) |
 | 이전 대화 | `kakaotalk_win_load_more` | `load_more` | `WM_VSCROLL`, 안 되면 `WM_MOUSEWHEEL` |
 | 본문 검색 | `kakaotalk_win_search` | `search_messages` | 불러온 메시지에서 직접 검색 |
 | 전송 | `kakaotalk_win_send` | `send_message` | 아래 "전송" 참고 |
@@ -86,7 +87,10 @@ Claude Code에서는 `claude mcp add kakaotalk-win -- "C:\...\.venv\Scripts\kaka
 - **채팅방 목록은 OCR입니다.** 목록 컨트롤에 텍스트를 읽을 방법이 없어서 화면 글자를 인식합니다. 이름이 틀릴 수 있습니다. 방 열기는 OCR과 상관없이 앱 검색과 창 제목으로 정확히 확인합니다.
   - `pages`를 주면 방 한 줄 정도 겹치게 내려 가며 여러 번 캡처하고, 겹친 줄은 합칩니다. 끝나면 목록을 맨 위로 되돌립니다. 방을 열지 않으므로 읽음 처리되지 않습니다.
   - 이름 뒤 숫자는 `memberCount`(참여 인원)로 분리합니다. 이름 앞 아이콘이 글자로 읽힌 경우 `nameVariants`에 후보를 함께 줍니다.
-  - 안 읽은 메시지 배지는 숫자 인식이 자주 틀려서, 배지의 빨간색으로 `hasUnread`를 판단하고 숫자는 읽힌 경우만 `unread`에 넣습니다.
+  - 안 읽은 메시지가 있는지(`hasUnread`)는 배지의 빨간색으로 판단합니다.
+  - 개수(`unread`)는 따로 읽습니다. 흰 숫자가 든 빨간 원을 그대로 인식시키면 "0"으로 읽히고, 숫자만 오려 낸 이미지는 Windows OCR이 아무것도 찾지 못합니다.
+    그래서 페이지 이미지에서 배지만 흰 바탕의 검은 숫자로 바꾸고, 시각 글자가 함께 있는 오른쪽 열을 잘라 2배로 키워 인식합니다. 배지 위치와 겹치는 글자만 개수로 씁니다.
+    한국어 인식에서 빠진 배지는 영어 인식으로 한 번 더 읽고, 그래도 못 읽으면 `unread`는 비워 둡니다.
 - **화면 배율이 다른 모니터에서도 캡처가 맞습니다.** 카카오톡은 시스템 배율 기준으로 그리기 때문에, 배율이 다른 모니터에서는 Windows가 화면을 늘리거나 줄여 보여 줍니다. 캡처와 좌표 계산은 카카오톡 창의 배율 기준(`GetWindowDpiAwarenessContext`, `SetThreadDpiAwarenessContext`)으로 해서 잘리지 않습니다.
 
 ## 읽기와 클립보드
@@ -97,6 +101,10 @@ Claude Code에서는 `claude mcp add kakaotalk-win -- "C:\...\.venv\Scripts\kaka
 2. 클립보드를 열지 않고 변경 번호만 보면서 카카오톡의 복사가 끝나기를 기다립니다. 카카오톡이 쓰는 도중에 충돌하지 않습니다.
 3. 클립보드 소유자가 카카오톡 프로세스일 때만 텍스트를 받습니다.
 4. 저장해 둔 내용을 되돌립니다. 그사이 사용자가 직접 복사했다면 사용자의 것을 남기고 덮어쓰지 않습니다.
+
+읽기가 끝나면 Ctrl+A로 생긴 전체 선택 표시를 풉니다. 그대로 두면 사용자가 창을 열었을 때 모든 메시지가 회색으로 선택돼 있습니다.
+메시지 목록 맨 아래 띠가 배경색 그대로일 때만 그 자리에 클릭 메시지를 보냅니다. 말풍선, 사진, 새 메시지 알림이 걸쳐 있으면 클릭하지 않습니다.
+여러 동작을 이어서 할 때는(`read_many`, `recent_messages` 등) 맨 바깥 호출이 끝날 때 한 번만 풉니다.
 
 한 번 읽는 데 0.1초 안팎(실측 약 75ms)입니다. 그 짧은 순간에 사용자가 붙여넣기를 하면 대화 내용이 붙여넣어질 수 있습니다.
 이건 클립보드 방식의 한계입니다. Windows 클립보드 기록(Win+V)이나 클라우드 동기화가 켜져 있으면 복사된 대화가 거기 남을 수 있어서, `status`가 경고합니다.
@@ -113,6 +121,18 @@ Claude Code에서는 `claude mcp add kakaotalk-win -- "C:\...\.venv\Scripts\kaka
 5. 버튼이 화면 밖에 있으면 한 화면씩 위로 올려 찾고, 끝나면 맨 아래로 돌아갑니다.
 
 500자가 넘는 글을 보낸 경우에도 전송 확인은 화면에 보이는 앞 500자로 합니다.
+
+## 최근 메시지 모으기
+
+`recent_messages(minutes=60, open_rooms=False, list_pages=3, max_rooms=10)`은 "최근 1시간 카톡 요약해 줘" 같은 요청을 한 번에 처리합니다.
+
+1. 채팅 목록을 `list_pages` 페이지 읽어서 시각(`오후 3:05`, `어제`, 날짜)이 지정한 시간 안에 드는 방을 고릅니다. 목록은 최근 순이라, 시간 밖의 방이 나오면 거기서 멈춥니다.
+2. 목록의 방 이름은 OCR이라 틀릴 수 있어서, 열려 있는 대화창 제목과 비슷한지 비교해 정확한 제목으로 바꿉니다. 후보가 둘 이상이면 고르지 않습니다.
+3. 열린 방은 읽어서 그 시각 이후 메시지만 돌려줍니다. 불러온 메시지가 시간 범위를 다 덮지 못하면 이전 대화를 두 번까지 더 불러오고, 그래도 모자라면 `mayBeIncomplete=true`로 알립니다.
+4. 닫힌 방은 기본으로 열지 않습니다. 방을 열면 카카오톡이 그 방을 읽음 처리하기 때문입니다. `notRead`에 목록의 미리보기와 안 읽은 개수만 담습니다.
+5. `open_rooms=True`면 닫힌 방을 앱 검색으로 열어 읽고 다시 닫습니다. 이렇게 연 방은 `markedAsRead`에 나옵니다. 에이전트는 사용자에게 읽음 처리된다고 알리고 동의를 받은 뒤에만 이 옵션을 씁니다.
+
+`listCoverage.complete=false`면 목록을 시간 범위 끝까지 보지 못한 것이니 `list_pages`를 늘립니다.
 
 ## 전송
 
@@ -233,7 +253,8 @@ kakaotalk-win call send_result --args-file C:\absolute\path\result.json
 - 카카오톡이 업데이트되면 내부 창 이름이나 복사 형식이 바뀔 수 있습니다.
   바뀌면 해당 기능이 `blocked`나 `unclassified`로 멈추고, 추측해서 동작하지 않습니다.
 - 확인한 환경은 카카오톡 PC 26.9.2(한국어 UI)와 Windows 11입니다.
-- 채팅 목록의 이름·시각은 OCR이라 글자가 틀릴 수 있습니다. 목록 배치(줄 높이, 프로필 사진 폭)는 카카오톡 PC 26.9.2 기준으로 맞춰 두었습니다.
+- 채팅 목록의 이름·시각·안 읽은 개수는 OCR이라 글자가 틀릴 수 있습니다. 목록 배치(줄 높이, 프로필 사진 폭)는 카카오톡 PC 26.9.2 기준으로 맞춰 두었습니다.
+- 목록 배치와 배지 인식은 150% 배율 모니터에서 확인했습니다. 100%·125% 배율과 영어 UI에서는 아직 확인하지 못했습니다.
 - 카카오톡을 여러 개 실행했거나(멀티 프로필) 원격 데스크톱 안에서 쓰는 경우는 지원하지 않습니다.
 
 ## 검증
@@ -243,3 +264,4 @@ kakaotalk-win call send_result --args-file C:\absolute\path\result.json
 ```
 
 단위 테스트는 가짜 카카오톡 창으로 전송 절차(중복 방지, 초안 보존, 한도, 안전 정지, 결과 재확인)를 검사합니다. 실제 카카오톡은 건드리지 않습니다.
+GitHub에 푸시하거나 풀 리퀘스트를 열 때마다 GitHub Actions(`.github/workflows/tests.yml`)가 Windows에서 Python 3.10과 3.13으로 같은 테스트를 돌립니다.
