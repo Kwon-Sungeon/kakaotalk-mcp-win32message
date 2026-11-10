@@ -59,7 +59,10 @@ class World:
     def post_plain_key(self, hwnd, vk):
         self.enters += 1
         if self.enter == "delivered":
-            self.rooms[hwnd].append(message("나", self.composer[hwnd].replace("\r\n", "\n")))
+            sent = self.composer[hwnd].replace("\r\n", "\n")
+            if len(sent) > 500:  # the real app shows (and copies) only the first 500 characters
+                sent = sent[:500] + "..."
+            self.rooms[hwnd].append(message("나", sent))
             self.composer[hwnd] = ""
         elif self.enter == "slow":  # taken from the composer, not shown yet
             self.pending = self.composer[hwnd].replace("\r\n", "\n")
@@ -254,6 +257,22 @@ class SenderTests(unittest.TestCase):
         self.assertEqual(self.world.enters, 1)
         with self.assertRaises(ValueError):
             sender.SendEngine(self.ops).recheck("never-sent")
+
+    def test_long_text_is_confirmed_from_the_shortened_view(self):
+        long_text = "\n".join(f"{index}번 항목: 오늘 회의에서 정한 내용을 정리합니다." for index in range(40))
+        self.assertGreater(len(long_text), 500)
+        result = self.send(text=long_text)
+        self.assertStatus(result, "observed_in_window")
+        self.assertEqual(self.world.enters, 1)
+        shown = self.world.rooms["친구"][-1]["text"]
+        self.assertTrue(shown.endswith("...") and len(shown) == 503)
+
+    def test_a_different_long_text_with_the_same_cut_is_not_accepted(self):
+        prefix = "가" * 500
+        self.world.rooms["친구"].append(message("나", prefix + "..."))  # an older, different long message
+        self.world.enter = "slow"
+        result = self.send(text=prefix + "다른 끝")
+        self.assertStatus(result, "outcome_unknown")
 
     def test_same_text_already_in_history_is_not_mistaken_for_the_new_send(self):
         self.world.rooms["친구"].append(message("나", "회의 자료 보냈어"))

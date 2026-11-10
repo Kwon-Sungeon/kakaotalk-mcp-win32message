@@ -45,6 +45,16 @@ def text_hash(text):
     return safety.sha256_hex(safety.normalize_text(text))
 
 
+def shows_sent_text(item, record):
+    """Does this read-back message show the sent text, in full or as the app's shortened view?"""
+    shown = item.get("text") or ""
+    if text_hash(shown) == record["textHash"]:
+        return True
+    if parser.is_cut(shown):
+        return text_hash(shown[:-len(parser.CUT_MARK)]) in (record.get("cutHashes") or ())
+    return False
+
+
 def binding(window_title, text, require_self):
     """What an operation_id is tied to: this room, this exact text, this self-check setting."""
     return safety.sha256_hex("\x1f".join((window_title, text, "self-only" if require_self else "any-room")))
@@ -159,6 +169,7 @@ class SendEngine:
             me = safety.self_name()
             record = dict(phase="dispatching", operationId=operation_id, windowTitle=window_title,
                           fingerprint=bound_to, textHash=text_hash(text), requireSelf=require_self,
+                          cutHashes=[text_hash(part) for part in parser.shown_prefixes(plain(text))],
                           selfName=safety.sha256_hex(me) if me else None, createdAt=time.time(),
                           baselineCount=len(messages),
                           baselineTail=[parser.fingerprint(item) for item in messages[-TAIL:]])
@@ -255,7 +266,7 @@ class SendEngine:
             # displayed time is no earlier than the dispatch.
             fresh = messages[-1:]
         for item in reversed(fresh or []):
-            if item.get("kind") != "text" or text_hash(item.get("text") or "") != record["textHash"]:
+            if item.get("kind") != "text" or not shows_sent_text(item, record):
                 continue
             if not aligned:
                 shown = _local_minutes(item)

@@ -122,6 +122,7 @@ def kakaotalk_win_read(window_title: str, limit: int = 50, offset: int = 0, snap
     가장 최근 메시지 쪽에서 limit개를 잘라 오고, 그 안에서는 오래된 것부터 놓입니다.
     더 앞의 메시지는 응답의 nextOffset을 offset에, snapshotId를 snapshot_id에 넣어 다시 부르면 됩니다.
     사진, 동영상, 이모티콘, 파일은 kind=media와 mediaType으로만 나옵니다. 내용을 보려면 read_attachment를 쓰세요.
+    500자가 넘는 메시지는 앱이 앞 500자만 내주므로 textTruncated=true가 붙습니다. 요약할 때 뒷부분이 빠졌다고 밝히세요.
     창 위치와 쓰다 만 글은 바꾸지 않고, 잠시 쓴 클립보드는 읽은 뒤 원래 내용으로 돌려놓습니다.
     아직 불러오지 않은 옛 대화는 kakaotalk_win_load_more를 먼저 부른 다음 읽으세요.
     """

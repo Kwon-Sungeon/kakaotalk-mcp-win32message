@@ -69,6 +69,34 @@ def parse_date(record):
     return None
 
 
+# KakaoTalk PC shows only the first DISPLAY_LIMIT characters of a long message (the rest is
+# behind a "전체보기" button) and copies exactly that shown part followed by CUT_MARK.
+DISPLAY_LIMIT = 500
+CUT_MARK = "..."
+
+
+def _utf16_units(text):
+    return len(text.encode("utf-16-le")) // 2
+
+
+def is_cut(body):
+    """True when a copied body looks like the app's shortened view of a longer message."""
+    if not body.endswith(CUT_MARK):
+        return False
+    shown = body[:-len(CUT_MARK)]
+    return DISPLAY_LIMIT in (len(shown), _utf16_units(shown))
+
+
+def shown_prefixes(text):
+    """What the app would show of `text` if it is too long: cut by characters and by UTF-16 units."""
+    text = text.strip()
+    if len(text) <= DISPLAY_LIMIT and _utf16_units(text) <= DISPLAY_LIMIT:
+        return []
+    by_characters = text[:DISPLAY_LIMIT]
+    by_units = text.encode("utf-16-le")[:DISPLAY_LIMIT * 2].decode("utf-16-le", errors="ignore")
+    return list(dict.fromkeys((by_characters, by_units)))
+
+
 def classify_body(body):
     if body in _DELETED:
         return "deleted", None
@@ -83,7 +111,7 @@ def classify_body(body):
 def parse(raw, self_name=None):
     """Return a list of records in chat order (oldest first).
 
-    Each message: {index, kind, sender, timeText, time, date, text, mediaType?, fromSelf?}
+    Each message: {index, kind, sender, timeText, time, date, text, mediaType?, textTruncated?, fromSelf?}
     Each non-message line: {index, kind: "system"|"unclassified", text, date}
     Date dividers are folded into the ``date`` of following records.
     """
@@ -106,6 +134,8 @@ def parse(raw, self_name=None):
                     "time": to_24h(header["time"]), "date": current_date, "text": body}
             if media:
                 item["mediaType"] = media
+            if kind == "text" and is_cut(body):
+                item["textTruncated"] = True  # only the first DISPLAY_LIMIT characters are available
             if self_name:
                 item["fromSelf"] = header["sender"] == self_name
             items.append(item)

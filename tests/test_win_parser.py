@@ -64,6 +64,22 @@ class ParserTests(unittest.TestCase):
         self.assertIsNone(parser.to_24h("25:00"))
         self.assertIsNone(parser.to_24h("어제"))
 
+    def test_long_messages_shortened_by_the_app_are_marked(self):
+        cut = "가나다라마" * 100 + "..."
+        raw = "\r\n".join(["2026년 11월 10일 화요일", f"[나] [오후 2:22] {cut}", "[친구] [오후 2:23] 그렇구나......"])
+        long_item, short_item = parser.parse(raw)
+        self.assertTrue(long_item["textTruncated"])
+        self.assertNotIn("textTruncated", short_item)
+
+    def test_shown_prefixes(self):
+        self.assertEqual(parser.shown_prefixes("짧은 글"), [])
+        text = "가" * 600
+        self.assertEqual(parser.shown_prefixes(text), ["가" * 500])
+        emoji = "😀" * 300  # 300 characters but 600 UTF-16 units
+        prefixes = parser.shown_prefixes(emoji)
+        self.assertIn("😀" * 250, prefixes)
+        self.assertTrue(parser.is_cut("😀" * 250 + "..."))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -22,6 +22,7 @@ MCP가 연결돼 있지 않을 때는 `kakaotalk-win call METHOD --args-file C:\
 - 방 하나는 `kakaotalk_win_read`, 여러 방은 `kakaotalk_win_read_many`로 읽는다.
 - 메시지 원문은 `items`의 `sender`, `date`, `time`, `text`다. `kind=media`는 사진·동영상·이모티콘·파일이 있었다는 표시뿐이다.
   내용을 봐야 하면 `kakaotalk_win_read_attachment`가 돌려준 캡처 이미지를 직접 본다.
+- `textTruncated=true`인 메시지는 500자가 넘어서 앞부분만 받은 것이다. 요약하거나 인용할 때 뒷부분이 빠졌다고 밝힌다.
 - 응답에 `hasMore=true`가 있으면 `nextOffset`을 `offset`에, `snapshotId`를 `snapshot_id`에 넣어 이어 읽는다.
   그사이 대화가 바뀌어 `snapshot_changed`가 오면 offset 0부터 새로 읽는다.
 - "지난주 대화 전부"처럼 기간을 요청받으면 `kakaotalk_win_load_more`로 몇 번만 더 불러온다. 답할 때는 `coverage.oldestDate`부터 읽었다고 밝히고, 대화의 처음까지 다 봤다고 말하지 않는다.
