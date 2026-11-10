@@ -23,6 +23,7 @@ import subprocess
 import time
 
 from . import capture as cap
+from . import checks as check
 from . import clipboard as cb
 from . import parser
 from . import safety
@@ -33,24 +34,18 @@ SOURCE = "kakaotalk_pc_win32"
 SB_PAGEUP = 2
 SB_BOTTOM = 7
 SB_TOP = 6
+MESSAGE_KINDS = ("text", "media", "deleted")
 
 
-def _title(value, name="window_title"):
-    if not isinstance(value, str) or not value.strip() or len(value) > 512:
-        raise ValueError(f"{name} must be the exact room name (1..512 characters)")
-    return value
+def _elapsed_ms(since):
+    return round((time.monotonic() - since) * 1000, 1)
 
 
-def _integer(value, name, low, high):
-    if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
-        raise ValueError(f"{name} must be an integer between {low} and {high}")
-    return value
-
-
-def _boolean(value, name):
-    if not isinstance(value, bool):
-        raise ValueError(f"{name} must be a boolean")
-    return value
+def _newest_page(items, limit, offset):
+    """The `limit` items that end `offset` items before the newest one, plus the next offset (or None)."""
+    stop = len(items) - min(offset, len(items))
+    begin = stop - min(limit, stop)
+    return items[begin:stop], (offset + stop - begin if begin else None)
 
 
 def _blocked(reason, **extra):
@@ -82,18 +77,19 @@ class KakaoTalkWin:
         def trigger(changed):
             w.post_chord(chat.message_list, [w.VK_CONTROL], [w.VK_A, w.VK_C], until=changed, timeout=1.5)
 
-        last_error = None
-        for attempt in range(3):
+        problem = "copy failed"
+        for backoff in (0.3, 0.6, 0.9):
             try:
-                text, info = cb.capture_text(trigger, pid)
+                copied, info = cb.capture_text(trigger, pid)
             except (cb.ClipboardConflict, cb.ClipboardBusy) as error:
-                last_error = error
-                time.sleep(0.3 * (attempt + 1))
-                continue
-            if text is not None:
-                return text, info
-            last_error = RuntimeError("The app did not copy its message list")
-        raise RuntimeError(str(last_error) if last_error else "copy failed")
+                problem = str(error)
+                time.sleep(backoff)
+            else:
+                if copied is None:
+                    problem = "The app did not copy its message list"
+                else:
+                    return copied, info
+        raise RuntimeError(problem)
 
     def _read_items(self, chat, pid):
         raw, info = self._copy(chat, pid)
@@ -148,9 +144,8 @@ class KakaoTalkWin:
 
     def rooms(self, query="", ocr=True, output_path=None):
         """Capture the visible room list (optionally filtered by the app's search) and OCR it."""
-        if not isinstance(query, str) or len(query) > 256:
-            raise ValueError("query must be a string of at most 256 characters")
-        _boolean(ocr, "ocr")
+        check.text(query, "query", 256, allow_empty=True)
+        check.flag(ocr, "ocr")
         with safety.process_lock("ui"):
             state = self._state()
             main = state.main
@@ -198,16 +193,15 @@ class KakaoTalkWin:
         return result
 
     def search_rooms(self, query):
-        if not isinstance(query, str):
-            raise ValueError("query must be a string")
-        return self.rooms(query=query)
+        """rooms() narrowed by the app's own room search."""
+        return self.rooms(query=check.text(query, "query", 256, allow_empty=True))
 
     # ------------------------------------------------------------------ open / close
 
     def open_room(self, window_title, require_existing=True):
         """Open an existing room by exact name via the app's room search; never creates a room."""
-        _title(window_title)
-        _boolean(require_existing, "require_existing")
+        check.room(window_title)
+        check.flag(require_existing, "require_existing")
         with safety.process_lock("ui"):
             state, chat, blocked = self._find_chat(window_title)
             if blocked:
@@ -273,8 +267,8 @@ class KakaoTalkWin:
         return False
 
     def close_room(self, window_title):
-        """Close the chat window only (not leaving the room). Keeps windows with a draft open."""
-        _title(window_title)
+        """WM_CLOSE on the chat window. The room itself is not left; a window holding a draft stays open."""
+        check.room(window_title)
         with safety.process_lock("ui"):
             _, chat, blocked = self._find_chat(window_title)
             if blocked:
@@ -290,162 +284,143 @@ class KakaoTalkWin:
     # ------------------------------------------------------------------ reading
 
     def read_messages(self, window_title, limit=50, offset=0, snapshot_id="", open_if_needed=False):
-        """Read the messages currently loaded in an open chat window, newest page first."""
-        _title(window_title)
-        _integer(limit, "limit", 1, 500)
-        _integer(offset, "offset", 0, 100000)
-        _boolean(open_if_needed, "open_if_needed")
-        if not isinstance(snapshot_id, str) or snapshot_id and not re.fullmatch(r"[0-9a-f]{24}", snapshot_id):
-            raise ValueError("snapshot_id must be the snapshotId returned by a previous read")
-        if offset and not snapshot_id:
-            raise ValueError("snapshot_id is required for offset > 0; read the first page again")
+        """Messages loaded in an open chat window, paged from the newest end (oldest first within a page)."""
+        check.room(window_title)
+        check.number(limit, "limit", 1, 500)
+        check.number(offset, "offset", 0, 100000)
+        check.flag(open_if_needed, "open_if_needed")
+        check.snapshot(snapshot_id, offset)
         with safety.process_lock("ui", wait_seconds=10):
             state, chat, blocked = self._find_chat(window_title)
+            if not blocked and chat is None and open_if_needed:
+                opening = self.open_room(window_title)
+                if opening["status"] != "ok":
+                    return opening
+                state, chat, blocked = self._find_chat(window_title)
             if blocked:
                 return blocked
-            if not chat and open_if_needed:
-                opened = self.open_room(window_title)
-                if opened.get("status") != "ok":
-                    return opened
-                state, chat, blocked = self._find_chat(window_title)
-            if not chat:
+            if chat is None:
                 return _blocked("room_window_not_open", detail="Open it first with open_room (or open_if_needed=true)")
-            started = time.monotonic()
+            began = time.monotonic()
             raw, items, info = self._read_items(chat, state.pid)
-        snapshot = parser.snapshot_id(raw)
-        if snapshot_id and snapshot_id != snapshot:
-            return {"status": "snapshot_changed", "source": SOURCE, "snapshotId": snapshot, "items": [],
+        current = parser.snapshot_id(raw)
+        if snapshot_id not in ("", current):
+            return {"status": "snapshot_changed", "source": SOURCE, "snapshotId": current, "items": [],
                     "reason": "The loaded messages changed; read again from offset 0"}
-        end = max(0, len(items) - offset)
-        start = max(0, end - limit)
-        page = items[start:end]
-        warnings = []
-        if any(item["kind"] in ("system", "unclassified") and safety.mentions_restriction(item.get("text"))
-               for item in items[-20:]):
-            warnings.append("A recent notice mentions a restriction/protection measure; check the app.")
+        page, next_offset = _newest_page(items, limit, offset)
+        notices = [item for item in items[-20:] if item["kind"] in ("system", "unclassified")]
+        warnings = ["A recent notice mentions a restriction/protection measure; check the app."] \
+            if any(safety.mentions_restriction(item.get("text")) for item in notices) else []
+        dates = [item["date"] for item in items if item.get("date")]
         return {"status": "ok", "source": SOURCE, "windowTitle": window_title, "items": page,
-                "total": len(items), "limit": limit, "offset": offset, "hasMore": start > 0,
-                "nextOffset": offset + (end - start) if start > 0 else None, "snapshotId": snapshot,
-                "messageCount": sum(item["kind"] in ("text", "media", "deleted") for item in items),
+                "total": len(items), "limit": limit, "offset": offset,
+                "hasMore": next_offset is not None, "nextOffset": next_offset, "snapshotId": current,
+                "messageCount": len([item for item in items if item["kind"] in MESSAGE_KINDS]),
                 "coverage": {"scope": "messages_loaded_in_window", "historyComplete": False,
-                             "oldestDate": next((item["date"] for item in items if item.get("date")), None)},
-                "clipboard": info["restore"], "warnings": warnings,
-                "elapsedMs": round((time.monotonic() - started) * 1000, 1)}
+                             "oldestDate": dates[0] if dates else None},
+                "clipboard": info["restore"], "warnings": warnings, "elapsedMs": _elapsed_ms(began)}
 
     def read_many(self, window_titles, limit=50, open_if_needed=True, close_after=False):
-        """Read up to 10 rooms one after another (the clipboard can serve one copy at a time)."""
-        if not isinstance(window_titles, list) or not 1 <= len(window_titles) <= 10:
-            raise ValueError("window_titles must contain 1..10 exact room names")
-        for name in window_titles:
-            _title(name)
-        if len(set(window_titles)) != len(window_titles):
-            raise ValueError("Duplicate window_titles are not allowed")
-        _integer(limit, "limit", 1, 500)
-        _boolean(open_if_needed, "open_if_needed")
-        _boolean(close_after, "close_after")
-        started = time.monotonic()
-        items, opened = [], []
-        for name in window_titles:
-            was_open = bool(self._state().chats_titled(name))
+        """Read up to 10 rooms in turn. Never in parallel: every read passes through the one clipboard."""
+        check.rooms(window_titles, most=10)
+        check.number(limit, "limit", 1, 500)
+        check.flag(open_if_needed, "open_if_needed")
+        check.flag(close_after, "close_after")
+        began = time.monotonic()
+        results, newly_opened = [], []
+        for title in window_titles:
+            open_before = bool(self._state().chats_titled(title))
             try:
-                value = self.read_messages(name, limit=limit, open_if_needed=open_if_needed)
-            except Exception as error:  # keep other rooms' results
-                value = {"status": "failed", "errorType": type(error).__name__, "detail": str(error)[:200]}
-            if not was_open and self._state().chats_titled(name):
-                opened.append(name)
-            items.append({"windowTitle": name, **value})
+                outcome = self.read_messages(title, limit=limit, open_if_needed=open_if_needed)
+            except Exception as error:  # one failing room must not hide the others
+                outcome = {"status": "failed", "errorType": type(error).__name__, "detail": str(error)[:200]}
+            if not open_before and self._state().chats_titled(title):
+                newly_opened.append(title)
+            results.append(dict(outcome, windowTitle=title))
             time.sleep(0.3)
-        cleanup = [self.close_room(name) for name in reversed(opened)] if close_after else []
-        succeeded = sum(item.get("status") == "ok" for item in items)
-        return {"status": "ok" if succeeded == len(items) else "partial", "source": SOURCE, "items": items,
-                "total": len(items), "succeeded": succeeded, "windowsOpened": opened, "cleanup": cleanup,
-                "atomicAcrossRooms": False, "elapsedMs": round((time.monotonic() - started) * 1000, 1)}
+        closed = [self.close_room(title) for title in newly_opened[::-1]] if close_after else []
+        ok_count = len([entry for entry in results if entry.get("status") == "ok"])
+        return {"status": "partial" if ok_count < len(results) else "ok", "source": SOURCE,
+                "items": results, "total": len(results), "succeeded": ok_count,
+                "windowsOpened": newly_opened, "cleanup": closed, "elapsedMs": _elapsed_ms(began)}
 
     def load_more(self, window_title, pages=1):
-        """Ask the app to load older messages by scrolling the list up, then restore the view."""
-        _title(window_title)
-        _integer(pages, "pages", 1, 10)
+        """Scroll the message list up so the app loads older messages, then go back to the bottom."""
+        check.room(window_title)
+        check.number(pages, "pages", 1, 10)
         with safety.process_lock("ui", wait_seconds=10):
             state, chat, blocked = self._find_chat(window_title)
             if blocked:
                 return blocked
-            if not chat:
+            if chat is None:
                 return _blocked("room_window_not_open")
-            _, before, _ = self._read_items(chat, state.pid)
-            count = len(before)
+
+            def loaded():
+                return len(self._read_items(chat, state.pid)[1])
+
+            first = current = loaded()
             steps = []
             try:
-                for _ in range(pages):
+                while len(steps) < pages:
                     for _ in range(6):
                         w.post(chat.message_list, w.WM_VSCROLL, SB_PAGEUP, 0)
                     w.post(chat.message_list, w.WM_VSCROLL, SB_TOP, 0)
                     time.sleep(1.0)
-                    _, after, _ = self._read_items(chat, state.pid)
-                    method = "WM_VSCROLL"
-                    if len(after) <= count:
-                        # Fallback: wheel-up messages to the list (no focus or cursor change).
+                    grown, method = loaded(), "WM_VSCROLL"
+                    if grown <= current:
+                        # Some builds ignore scroll-bar messages; wheel messages need no focus or cursor either.
                         _post_wheel_up(chat.message_list, notches=10)
                         time.sleep(1.0)
-                        _, after, _ = self._read_items(chat, state.pid)
-                        method = "WM_MOUSEWHEEL"
-                    steps.append({"recordsBefore": count, "recordsAfter": len(after), "method": method})
-                    if len(after) <= count:
+                        grown, method = loaded(), "WM_MOUSEWHEEL"
+                    steps.append({"recordsBefore": current, "recordsAfter": grown, "method": method})
+                    if grown <= current:
                         break
-                    count = len(after)
+                    current = grown
             finally:
                 w.post(chat.message_list, w.WM_VSCROLL, SB_BOTTOM, 0)
         return {"status": "ok", "source": SOURCE, "windowTitle": window_title, "steps": steps,
-                "recordsBefore": len(before), "recordsAfter": count, "contentChanged": count != len(before),
+                "recordsBefore": first, "recordsAfter": current, "contentChanged": current != first,
                 "historyComplete": False, "endOfHistory": None,
                 "note": "No growth does not prove the start of the conversation was reached."}
 
     def search_messages(self, window_title, query, limit=100, load_pages=0, case_sensitive=False, context_rows=2):
-        """Search the loaded messages of one room (optionally loading older ones first)."""
-        _title(window_title)
-        if not isinstance(query, str) or not query.strip() or len(query) > 512:
-            raise ValueError("query must be a non-empty string of at most 512 characters")
-        _integer(limit, "limit", 1, 500)
-        _integer(load_pages, "load_pages", 0, 10)
-        _boolean(case_sensitive, "case_sensitive")
-        _integer(context_rows, "context_rows", 0, 10)
-        history = self.load_more(window_title, load_pages) if load_pages else None
-        if history and history.get("status") != "ok":
-            return history
+        """Substring search over sender and text of the loaded messages, with neighbours for context."""
+        check.room(window_title)
+        check.text(query, "query", 512)
+        check.number(limit, "limit", 1, 500)
+        check.number(load_pages, "load_pages", 0, 10)
+        check.flag(case_sensitive, "case_sensitive")
+        check.number(context_rows, "context_rows", 0, 10)
+        if load_pages:
+            loading = self.load_more(window_title, load_pages)
+            if loading["status"] != "ok":
+                return loading
         with safety.process_lock("ui", wait_seconds=10):
             state, chat, blocked = self._find_chat(window_title)
             if blocked:
                 return blocked
-            if not chat:
+            if chat is None:
                 return _blocked("room_window_not_open")
             raw, items, _ = self._read_items(chat, state.pid)
-        needle = query if case_sensitive else query.casefold()
-        matches = []
-        for index, item in enumerate(items):
-            haystack = " ".join(str(item.get(key) or "") for key in ("sender", "text"))
-            if needle in (haystack if case_sensitive else haystack.casefold()):
-                matches.append({**item, "contextBefore": items[max(0, index - context_rows):index],
-                                "contextAfter": items[index + 1:index + 1 + context_rows]})
+        fold = str if case_sensitive else str.casefold
+        wanted = fold(query)
+        hits = [{**item, "contextBefore": items[max(0, at - context_rows):at],
+                 "contextAfter": items[at + 1:at + 1 + context_rows]}
+                for at, item in enumerate(items)
+                if wanted in fold(f"{item.get('sender') or ''} {item.get('text') or ''}")]
         return {"status": "ok", "source": SOURCE, "windowTitle": window_title, "query": query,
-                "items": matches[-limit:], "total": len(matches), "truncated": len(matches) > limit,
+                "items": hits[-limit:], "total": len(hits), "truncated": len(hits) > limit,
                 "searchedRecords": len(items), "snapshotId": parser.snapshot_id(raw),
-                "searchScope": "messages_loaded_in_window", "historyRequested": bool(load_pages),
+                "searchScope": "messages_loaded_in_window", "historyRequested": load_pages > 0,
                 "coverage": {"historyComplete": False}}
-
-    def close_search(self, window_title):
-        """Compatibility no-op: searching is done locally and never opens the app's search UI."""
-        _title(window_title)
-        return {"status": "ok", "source": SOURCE, "windowTitle": window_title, "searchUiOpened": False}
 
     # ------------------------------------------------------------------ capture (attachments, emoticons)
 
     def capture(self, window_title, output_path=None, ocr=False):
         """PNG of one chat window as currently rendered (photos, emoticons, cards)."""
-        _title(window_title)
-        _boolean(ocr, "ocr")
-        if output_path is not None and (not isinstance(output_path, str) or not os.path.isabs(output_path)):
-            raise ValueError("output_path must be an absolute path")
-        if output_path and os.path.exists(output_path):
-            raise ValueError("output_path already exists")
+        check.room(window_title)
+        check.flag(ocr, "ocr")
+        check.new_file(output_path)
         with safety.process_lock("ui", wait_seconds=10):
             _, chat, blocked = self._find_chat(window_title)
             if blocked:
@@ -468,13 +443,17 @@ class KakaoTalkWin:
 
     # ------------------------------------------------------------------ sending
 
+    def _sender(self):
+        from .sender import SendEngine  # imported late: sender imports this module's helpers
+        return SendEngine(self)
+
     def send_message(self, window_title, text, operation_id, wait_seconds=8, require_self=False):
-        from .sender import SendEngine
-        return SendEngine(self).send(window_title, text, operation_id, wait_seconds, require_self)
+        """One journaled send into an existing room (see sender.py for the full procedure)."""
+        return self._sender().send(window_title, text, operation_id, wait_seconds, require_self)
 
     def send_result(self, operation_id, wait_seconds=0):
-        from .sender import SendEngine
-        return SendEngine(self).result(operation_id, wait_seconds)
+        """Journal lookup for an earlier send; re-checks by reading only and never types again."""
+        return self._sender().recheck(operation_id, wait_seconds)
 
 
 # ---------------------------------------------------------------------- module helpers
@@ -571,8 +550,5 @@ def _rows_from_ocr(lines, width):
             nearest["timeText"] = text
         elif re.fullmatch(r"\d{1,3}\+?|999\+", text) and nearest["unread"] is None:
             nearest["unread"] = text
-    for index, row in enumerate(rows):
-        row["position"] = index
-        row.pop("_top")
-        row.pop("_bottom")
-    return rows
+    return [{**{key: value for key, value in row.items() if not key.startswith("_")}, "position": place}
+            for place, row in enumerate(rows)]

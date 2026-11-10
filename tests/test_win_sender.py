@@ -1,4 +1,5 @@
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -91,13 +92,13 @@ class FakeOps:
 
 class SenderTests(unittest.TestCase):
     def setUp(self):
-        directory = tempfile.TemporaryDirectory()
-        self.addCleanup(directory.cleanup)
+        state_dir = Path(tempfile.mkdtemp(prefix="kakaotalk-win-test-"))
+        self.addCleanup(shutil.rmtree, state_dir, ignore_errors=True)
         self.world = World()
         self.ops = FakeOps(self.world)
         self.answers = []
         patches = [
-            patch.object(safety, "STATE_ROOT", Path(directory.name)),
+            patch.object(safety, "STATE_ROOT", state_dir),
             patch.dict(os.environ, {"KAKAOTALK_WIN_SELF_NAME": "나"}),
             patch.object(w, "replace_all_text", self.world.replace_all_text),
             patch.object(w, "control_text", self.world.control_text),
@@ -115,6 +116,12 @@ class SenderTests(unittest.TestCase):
         self.answers.append((room, text, tuple(notes)))
         return True
 
+    def assertStatus(self, result, expected):
+        self.assertEqual(expected, result.get("status"), result)
+
+    def assertReason(self, result, expected):
+        self.assertEqual(expected, result.get("reason"), result)
+
     def send(self, room="친구", text="회의 자료 보냈어", op="op-1", **kwargs):
         return sender.SendEngine(self.ops).send(room, text, op, wait_seconds=kwargs.pop("wait", 0.5), **kwargs)
 
@@ -131,7 +138,7 @@ class SenderTests(unittest.TestCase):
 
     def test_send_is_confirmed_once_and_deduplicated(self):
         result = self.send(text="첫 줄\n둘째 줄")
-        self.assertEqual(result["status"], "observed_in_window")
+        self.assertStatus(result, "observed_in_window")
         self.assertTrue(result["authorVerified"])
         self.assertEqual(result["dispatchCalls"], 1)
         self.assertEqual(self.world.typed, ["첫 줄\r\n둘째 줄"])
@@ -147,21 +154,21 @@ class SenderTests(unittest.TestCase):
 
     def test_closed_existing_room_is_opened_through_search(self):
         result = self.send(room="둘", text="확인했습니다")
-        self.assertEqual(result["status"], "observed_in_window")
+        self.assertStatus(result, "observed_in_window")
         self.assertEqual(self.ops.opens, ["둘"])
         self.assertTrue(result["openedWindow"])
 
     def test_unknown_room_and_room_without_history_are_never_typed_into(self):
         self.assertEqual(self.send(room="없는방")["reason"], "room_not_found")
         result = self.send(room="빈방", op="op-2")
-        self.assertEqual(result["reason"], "room_without_history")
+        self.assertReason(result, "room_without_history")
         self.assertFalse(result["dispatched"])
         self.assertEqual(self.world.typed, [])
         self.assertEqual(self.answers, [])
 
     def test_dialog_mode_asks_once_before_typing(self):
         self.dialog_mode()
-        self.assertEqual(self.send()["status"], "observed_in_window")
+        self.assertStatus(self.send(), "observed_in_window")
         self.assertEqual(len(self.answers), 1)
         self.assertEqual(self.answers[0][:2], ("친구", "회의 자료 보냈어"))
 
@@ -169,14 +176,14 @@ class SenderTests(unittest.TestCase):
         self.dialog_mode()
         with patch.object(sender.confirm, "ask_send", lambda *args, **kwargs: False):
             result = self.send()
-        self.assertEqual(result["reason"], "declined_by_user")
+        self.assertReason(result, "declined_by_user")
         self.assertEqual(self.world.typed, [])
         self.assertFalse(safety.journal_path("op-1").exists())
 
     def test_existing_draft_is_preserved(self):
         self.world.composer["친구"] = "쓰던 글"
         result = self.send()
-        self.assertEqual(result["reason"], "existing_draft_preserved")
+        self.assertReason(result, "existing_draft_preserved")
         self.assertEqual(self.world.composer["친구"], "쓰던 글")
 
     def test_draft_typed_during_the_dialog_is_preserved(self):
@@ -187,34 +194,34 @@ class SenderTests(unittest.TestCase):
             return True
         with patch.object(sender.confirm, "ask_send", typing_human):
             result = self.send()
-        self.assertEqual(result["reason"], "existing_draft_preserved")
+        self.assertReason(result, "existing_draft_preserved")
         self.assertEqual(self.world.composer["친구"], "사람이 입력 중")
 
     def test_ignored_enter_removes_text_and_two_failures_stop_sending(self):
         self.world.enter = "ignored"
         first = self.send(op="a")
-        self.assertEqual(first["status"], "blocked")
-        self.assertEqual(first["reason"], "enter_not_accepted_text_removed")
+        self.assertStatus(first, "blocked")
+        self.assertReason(first, "enter_not_accepted_text_removed")
         self.assertEqual(self.world.composer["친구"], "")
         self.allow_next_send()
         second = self.send(op="b", text="두 번째")
         self.assertTrue(second["safetyStop"]["tripped"])
         self.allow_next_send()
         third = self.send(op="c", text="세 번째")
-        self.assertEqual(third["reason"], "safety_stop_active")
+        self.assertReason(third, "safety_stop_active")
         self.assertEqual(self.world.enters, 2)
 
     def test_pacing_gate_runs_before_the_dialog(self):
         self.dialog_mode()
-        self.assertEqual(self.send(op="a")["status"], "observed_in_window")
+        self.assertStatus(self.send(op="a"), "observed_in_window")
         blocked = self.send(op="b", text="곧바로 두 번째")
-        self.assertEqual(blocked["reason"], "send_interval")
+        self.assertReason(blocked, "send_interval")
         self.assertEqual(len(self.answers), 1)
 
     def test_require_self(self):
         self.assertEqual(self.send(room="친구", require_self=True)["reason"], "self_room_not_verified")
         result = self.send(room="나", op="self-1", require_self=True)
-        self.assertEqual(result["status"], "observed_in_window")
+        self.assertStatus(result, "observed_in_window")
         with patch.dict(os.environ, {"KAKAOTALK_WIN_SELF_NAME": ""}):
             self.allow_next_send()
             self.assertEqual(self.send(room="나", op="self-2", text="또", require_self=True)["reason"],
@@ -223,7 +230,7 @@ class SenderTests(unittest.TestCase):
     def test_restriction_notice_trips_the_safety_stop(self):
         self.world.rooms["친구"].append({"kind": "unclassified", "text": "카카오톡 이용이 제한되었습니다."})
         result = self.send()
-        self.assertEqual(result["reason"], "restriction_notice_detected")
+        self.assertReason(result, "restriction_notice_detected")
         self.assertTrue(safety.breaker_state()["tripped"])
         self.assertEqual(self.world.typed, [])
 
@@ -238,21 +245,21 @@ class SenderTests(unittest.TestCase):
     def test_unknown_outcome_is_rechecked_without_retyping(self):
         self.world.enter = "slow"
         result = self.send(op="slow-1")
-        self.assertEqual(result["status"], "outcome_unknown")
+        self.assertStatus(result, "outcome_unknown")
         self.assertEqual(self.world.enters, 1)
         # The message finally shows up.
         self.world.rooms["친구"].append(message("나", self.world.pending))
-        checked = sender.SendEngine(self.ops).result("slow-1")
-        self.assertEqual(checked["status"], "observed_in_window")
+        checked = sender.SendEngine(self.ops).recheck("slow-1")
+        self.assertStatus(checked, "observed_in_window")
         self.assertEqual(self.world.enters, 1)
         with self.assertRaises(ValueError):
-            sender.SendEngine(self.ops).result("never-sent")
+            sender.SendEngine(self.ops).recheck("never-sent")
 
     def test_same_text_already_in_history_is_not_mistaken_for_the_new_send(self):
         self.world.rooms["친구"].append(message("나", "회의 자료 보냈어"))
         self.world.enter = "slow"
         result = self.send()
-        self.assertEqual(result["status"], "outcome_unknown")
+        self.assertStatus(result, "outcome_unknown")
 
     def test_tail_alignment(self):
         items = [message("a", str(index)) for index in range(5)]

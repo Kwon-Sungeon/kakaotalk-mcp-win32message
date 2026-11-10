@@ -26,10 +26,11 @@ import json
 import msvcrt
 import os
 import re
-import tempfile
 import threading
 import time
 from pathlib import Path
+
+from . import checks
 
 STATE_ROOT = Path(os.environ.get("KAKAOTALK_WIN_STATE", Path(os.environ.get("LOCALAPPDATA", Path.home())) /
                                  "kakaotalk-win"))
@@ -52,16 +53,17 @@ LINK = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
 _thread_lock = threading.RLock()
 
 
-def digest(value):
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+def sha256_hex(value):
+    return hashlib.sha256(bytes(value, "utf-8")).hexdigest()
 
 
 def short_hash(value):
-    return digest(value)[:16]
+    return sha256_hex(value)[:16]
 
 
 def normalize_text(text):
-    return " ".join(text.replace("\r\n", "\n").replace("\r", "\n").split()).casefold()
+    """Whitespace-insensitive, case-insensitive form used for duplicate checks."""
+    return " ".join(text.split()).casefold()
 
 
 def _ensure_root():
@@ -70,25 +72,27 @@ def _ensure_root():
 
 
 def save_json(path, value):
+    """Replace the file in one step, so a crash leaves either the old or the new content."""
+    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary = tempfile.mkstemp(prefix=".tmp-", dir=path.parent)
+    part = path.with_name(f".{path.name}.{os.getpid()}-{threading.get_ident()}.part")
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            json.dump(value, stream, ensure_ascii=False)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+        with open(part, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(value, ensure_ascii=False))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(part, path)
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
 
 
 def load_json(path, default=None):
     try:
-        with open(path, encoding="utf-8") as stream:
-            return json.load(stream)
+        content = Path(path).read_text(encoding="utf-8")
     except FileNotFoundError:
         return default
+    return json.loads(content)
 
 
 _held = threading.local()
@@ -273,9 +277,10 @@ def trip(reason, **detail):
 
 
 def reset_breaker():
-    previous = breaker_state()
+    """Clear the stop and hand back what it was, so the CLI can show the reason that was cleared."""
+    cleared = breaker_state()
     save_json(_breaker_path(), {"tripped": False, "resetAt": time.time()})
-    return previous
+    return cleared
 
 
 def note_unconfirmed_send():
@@ -307,6 +312,6 @@ def mentions_restriction(text):
 # --------------------------------------------------------------------------- send journal
 
 def journal_path(operation_id):
-    if not isinstance(operation_id, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", operation_id):
-        raise ValueError("operation_id must be 1..128 letters, digits, dots, underscores, colons or hyphens")
-    return STATE_ROOT / "send-operations" / (digest(operation_id) + ".json")
+    """Journal file of one operation. The file name is a hash, so IDs never become paths."""
+    name = sha256_hex(checks.operation_id(operation_id))
+    return STATE_ROOT / "send-operations" / f"{name}.json"

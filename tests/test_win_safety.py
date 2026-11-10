@@ -1,3 +1,4 @@
+import shutil
 import sys
 import tempfile
 import unittest
@@ -12,11 +13,11 @@ from kakaotalk_win import safety  # noqa: E402
 
 class StateTestCase(unittest.TestCase):
     def setUp(self):
-        self.directory = tempfile.TemporaryDirectory()
-        patcher = patch.object(safety, "STATE_ROOT", Path(self.directory.name))
+        self.state_dir = Path(tempfile.mkdtemp(prefix="kakaotalk-win-test-"))
+        self.addCleanup(shutil.rmtree, self.state_dir, ignore_errors=True)
+        patcher = patch.object(safety, "STATE_ROOT", self.state_dir)
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.addCleanup(self.directory.cleanup)
         environment = patch.dict("os.environ", {}, clear=False)
         environment.start()
         self.addCleanup(environment.stop)

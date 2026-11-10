@@ -82,16 +82,15 @@ def png_bytes(image):
 
 
 def save_png(image, output_path=None):
+    """Write the PNG to output_path, which must not exist yet, or to a new private temporary file."""
     data = png_bytes(image)
     if output_path:
-        path = Path(output_path)
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+        target = open(output_path, "xb")  # "x" refuses to overwrite an existing file
     else:
-        descriptor, name = tempfile.mkstemp(prefix="kakaotalk-win-", suffix=".png")
-        path = Path(name)
-    with os.fdopen(descriptor, "wb") as stream:
-        stream.write(data)
-    return str(path)
+        target = tempfile.NamedTemporaryFile(prefix="kakaotalk-win-", suffix=".png", delete=False)
+    with target:
+        target.write(data)
+    return str(Path(target.name))
 
 
 def difference(a, b, step=4):

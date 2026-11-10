@@ -21,25 +21,19 @@ Anything that cannot be confirmed is ``outcome_unknown`` and is never retried
 automatically. Message bodies are stored only as hashes.
 """
 
-import json
 import re
 import time
 from datetime import datetime
 
-from . import confirm, parser, safety
+from . import checks, confirm, parser, safety
 from . import win32 as w
 
 SOURCE = "kakaotalk_pc_win32"
-FINAL_PHASES = ("observed_in_window", "blocked")
+SETTLED = frozenset({"observed_in_window", "blocked"})
 MESSAGE_KINDS = ("text", "media", "deleted")
 URL = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
 TAIL = 32
-
-
-def wait_value(value):
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 20:
-        raise ValueError("wait_seconds must be between 0 and 20")
-    return float(value)
+POLL_SECONDS = 0.25
 
 
 def plain(text):
@@ -48,7 +42,12 @@ def plain(text):
 
 
 def text_hash(text):
-    return safety.digest(safety.normalize_text(text))
+    return safety.sha256_hex(safety.normalize_text(text))
+
+
+def binding(window_title, text, require_self):
+    """What an operation_id is tied to: this room, this exact text, this self-check setting."""
+    return safety.sha256_hex("\x1f".join((window_title, text, "self-only" if require_self else "any-room")))
 
 
 def messages_of(items):
@@ -83,12 +82,15 @@ class SendEngine:
     # ------------------------------------------------------------------ results
 
     @staticmethod
-    def _output(record, **extra):
-        return {"status": record["phase"], "operationId": record["operationId"],
-                "windowTitle": record["windowTitle"], "source": SOURCE, "dispatched": record["phase"] != "blocked"
-                or bool(record.get("dispatch", {}).get("entered")), "retrySafe": False,
-                "reason": record.get("reason"), "authorVerified": record.get("authorVerified"),
-                "dispatch": record.get("dispatch"), **extra}
+    def _report(record, **extra):
+        phase = record["phase"]
+        entered = bool((record.get("dispatch") or {}).get("entered"))
+        report = dict(status=phase, operationId=record["operationId"], windowTitle=record["windowTitle"],
+                      source=SOURCE, dispatched=phase != "blocked" or entered, retrySafe=False,
+                      reason=record.get("reason"), authorVerified=record.get("authorVerified"),
+                      dispatch=record.get("dispatch"))
+        report.update(extra)
+        return report
 
     @staticmethod
     def _not_sent(operation_id, window_title, reason=None, **extra):
@@ -100,22 +102,16 @@ class SendEngine:
     # ------------------------------------------------------------------ send
 
     def send(self, window_title, text, operation_id, wait_seconds=8, require_self=False):
-        from .operations import _boolean, _title
-        _title(window_title)
-        _boolean(require_self, "require_self")
-        wait = wait_value(wait_seconds)
-        if not isinstance(text, str) or not text.strip():
-            raise ValueError("text must be a non-empty string")
+        checks.room(window_title)
+        checks.flag(require_self, "require_self")
+        wait = checks.seconds(wait_seconds)
+        checks.text(text, "text", 100_000)
         path = safety.journal_path(operation_id)
-        fingerprint = safety.digest(json.dumps([window_title, text, require_self], ensure_ascii=False))
+        bound_to = binding(window_title, text, require_self)
         with safety.process_lock("send", wait_seconds=2), safety.process_lock("ui", wait_seconds=10):
-            record = safety.load_json(path)
-            if record:
-                if record.get("fingerprint") != fingerprint:
-                    raise ValueError("operation_id is already bound to another room or message")
-                if record["phase"] in FINAL_PHASES:
-                    return self._output(record, deduplicated=True, dispatchCalls=0)
-                return {**self._confirm(path, record, wait, first=False), "deduplicated": True, "dispatchCalls": 0}
+            earlier = safety.load_json(path)
+            if earlier:
+                return self._repeat(path, earlier, bound_to, wait)
 
             gate = safety.check_send_allowed(window_title, text)
             if gate:
@@ -124,16 +120,15 @@ class SendEngine:
             state, chat, blocked = self.ops._find_chat(window_title)
             if blocked:
                 return self._not_sent(operation_id, window_title, **blocked)
-            opened_now = False
-            if not chat:
-                opened = self.ops.open_room(window_title, require_existing=False)
-                if opened.get("status") != "ok":
-                    return self._not_sent(operation_id, window_title, **opened)
-                opened_now = True
+            opened_now = chat is None
+            if opened_now:
+                opening = self.ops.open_room(window_title, require_existing=False)
+                if opening["status"] != "ok":
+                    return self._not_sent(operation_id, window_title, **opening)
                 state, chat, blocked = self.ops._find_chat(window_title)
                 if blocked:
                     return self._not_sent(operation_id, window_title, **blocked)
-                if not chat:
+                if chat is None:
                     return self._not_sent(operation_id, window_title, "room_window_not_open")
             if state.main and state.main.locked:
                 return self._not_sent(operation_id, window_title, "kakaotalk_locked")
@@ -161,12 +156,12 @@ class SendEngine:
                 _, items, _ = self.ops._read_items(chat, state.pid)
                 messages = messages_of(items)
 
-            record = {"operationId": operation_id, "windowTitle": window_title, "fingerprint": fingerprint,
-                      "textHash": text_hash(text), "requireSelf": require_self,
-                      "selfName": safety.digest(safety.self_name()) if safety.self_name() else None,
-                      "baselineCount": len(messages),
-                      "baselineTail": [parser.fingerprint(item) for item in messages][-TAIL:],
-                      "createdAt": time.time(), "phase": "dispatching"}
+            me = safety.self_name()
+            record = dict(phase="dispatching", operationId=operation_id, windowTitle=window_title,
+                          fingerprint=bound_to, textHash=text_hash(text), requireSelf=require_self,
+                          selfName=safety.sha256_hex(me) if me else None, createdAt=time.time(),
+                          baselineCount=len(messages),
+                          baselineTail=[parser.fingerprint(item) for item in messages[-TAIL:]])
             safety.save_json(path, record)
             safety.record_send(window_title, text)
             try:
@@ -177,9 +172,21 @@ class SendEngine:
             if dispatch.get("entered") is False:
                 record.update(phase="blocked", reason=dispatch.get("reason"))
                 safety.save_json(path, record)
-                return self._output(record, dispatchCalls=1, warnings=notes)
-            result = self._confirm(path, record, wait, first=True)
-            return {**result, "dispatchCalls": 1, "warnings": notes, "openedWindow": opened_now}
+                return self._report(record, dispatchCalls=1, warnings=notes)
+            report = self._confirm(path, record, wait, first=True)
+            report.update(dispatchCalls=1, warnings=notes, openedWindow=opened_now)
+            return report
+
+    def _repeat(self, path, record, bound_to, wait):
+        """Same operation_id again: never type, only report or re-check what the journal holds."""
+        if record.get("fingerprint") != bound_to:
+            raise ValueError("operation_id: already used for a different room or text; make a new ID")
+        if record["phase"] in SETTLED:
+            report = self._report(record)
+        else:
+            report = self._confirm(path, record, wait, first=False)
+        report.update(deduplicated=True, dispatchCalls=0)
+        return report
 
     def _check_target(self, chat, pid, window_title, require_self):
         try:
@@ -256,7 +263,7 @@ class SendEngine:
                     continue
             author = None
             if record.get("selfName"):
-                author = safety.digest(item.get("sender") or "") == record["selfName"]
+                author = safety.sha256_hex(item.get("sender") or "") == record["selfName"]
                 if not author:
                     continue
             if draft:
@@ -264,55 +271,52 @@ class SendEngine:
             return {"observed": True, "authorVerified": author, "baselineAligned": aligned}
         return {"observed": False, "reason": "new_message_not_observed", "baselineAligned": aligned}
 
+    def _settle_observed(self, path, record, observed):
+        record.update(phase="observed_in_window", reason="new_message_and_empty_composer",
+                      authorVerified=observed.get("authorVerified"))
+        safety.save_json(path, record)
+        safety.note_confirmed_send()
+        return self._report(record)
+
     def _confirm(self, path, record, wait, first):
-        until = time.monotonic() + wait
-        observed = {}
+        deadline = time.monotonic() + wait
         while True:
             observed = self._observe(record)
             if observed.get("observed"):
-                record.update(phase="observed_in_window", reason="new_message_and_empty_composer",
-                              authorVerified=observed.get("authorVerified"))
-                safety.save_json(path, record)
-                safety.note_confirmed_send()
-                return self._output(record)
-            if time.monotonic() >= until:
+                return self._settle_observed(path, record, observed)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 break
-            time.sleep(min(0.25, max(0.0, until - time.monotonic())))
+            time.sleep(min(POLL_SECONDS, remaining))
         if first and observed.get("textInComposer"):
             # Enter was not taken: remove our text so it cannot be sent later by accident.
-            chat = observed["chat"]
             try:
-                w.set_control_text(chat.composer, "")
+                w.set_control_text(observed["chat"].composer, "")
                 time.sleep(0.4)
                 again = self._observe(record)
-            except Exception:
+            except Exception:  # unreadable now: fall through to outcome_unknown below
                 again = {}
             if again.get("observed"):
-                record.update(phase="observed_in_window", reason="new_message_and_empty_composer",
-                              authorVerified=again.get("authorVerified"))
-                safety.save_json(path, record)
-                safety.note_confirmed_send()
-                return self._output(record)
+                return self._settle_observed(path, record, again)
             if not again.get("textInComposer") and again.get("reason") != "composer_unresponsive":
                 record.update(phase="blocked", reason="enter_not_accepted_text_removed")
                 safety.save_json(path, record)
-                stop = safety.note_unconfirmed_send()
-                return self._output(record, safetyStop=stop)
+                return self._report(record, safetyStop=safety.note_unconfirmed_send())
         record.update(phase="outcome_unknown", reason=observed.get("reason", "not_observed"))
         safety.save_json(path, record)
-        stop = safety.note_unconfirmed_send() if first else None
-        return self._output(record, safetyStop=stop,
+        return self._report(record, safetyStop=safety.note_unconfirmed_send() if first else None,
                             note="Do not send again. Check with send_result using the same operation_id.")
 
-    # ------------------------------------------------------------------ result
+    # ------------------------------------------------------------------ later checks
 
-    def result(self, operation_id, wait_seconds=0):
-        wait = wait_value(wait_seconds)
+    def recheck(self, operation_id, wait_seconds=0):
+        """Report a journaled send; an unsettled one is re-checked by reading only."""
+        wait = checks.seconds(wait_seconds)
         path = safety.journal_path(operation_id)
         with safety.process_lock("send", wait_seconds=2), safety.process_lock("ui", wait_seconds=10):
             record = safety.load_json(path)
-            if not record:
-                raise ValueError("Unknown operation_id")
-            if record["phase"] in FINAL_PHASES:
-                return self._output(record)
+            if record is None:
+                raise ValueError("operation_id: no send with this ID is recorded on this PC")
+            if record["phase"] in SETTLED:
+                return self._report(record)
             return self._confirm(path, record, wait, first=False)

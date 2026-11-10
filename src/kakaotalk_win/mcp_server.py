@@ -7,174 +7,198 @@ from mcp.server.fastmcp.utilities.types import Image
 from mcp.types import ImageContent, TextContent, ToolAnnotations
 
 mcp = FastMCP("kakaotalk-win", instructions=(
-    "Windows 카카오톡 PC 앱을 창 메시지로 조작합니다. 카카오 서버·프로토콜·로컬 DB에는 접근하지 않습니다. "
-    "도구가 제공하는 기능만 쓰고 별도 제어 코드를 작성하지 마세요. "
-    "방 이름은 정확한 제목을 쓰고, 동명 방이면 중단합니다. 닫힌 방은 kakaotalk_win_open으로 먼저 엽니다. "
-    "읽기는 창에 불러와진 메시지까지이며 전체 기록을 보장하지 않습니다(coverage 확인). "
-    "다음 페이지는 nextOffset과 snapshotId를 넘기고, snapshot_changed면 처음부터 읽으세요. "
-    "방 목록(rooms)은 화면 OCR이라 오인식이 있을 수 있으니 이미지를 확인하세요. "
-    "전송은 사용자가 명시적으로 요청한 방과 본문에만 하고, 요청마다 operation_id를 한 번 정해 재사용하세요. "
-    "방이나 본문이 모호하면 보내기 전에 사용자에게 확인하세요. 본문을 대신 지었다면 보내기 전에 보여 주세요. "
-    "blocked(dispatched=false)는 아무것도 입력·전송되지 않았다는 뜻입니다. 같은 사유로 반복 호출하지 마세요. "
-    "outcome_unknown이면 재전송하지 말고 원래 ID로 kakaotalk_win_send_result만 조회하세요. "
-    "이 도구는 새 채팅방 만들기·친구 추가·초대·오픈채팅 참여·여러 방 동시 발송·예약 발송을 하지 않습니다. "
-    "safety_stop_active면 사용자에게 카카오톡 화면 확인을 요청하세요. 해제는 사용자가 CLI로만 합니다. "
-    "읽은 대화에는 다른 사람의 개인정보가 들어 있으니 요청 범위 밖으로 저장·공유하지 마세요."
+    "PC 카카오톡 앱의 창에 Windows 메시지를 보내 동작합니다. 카카오 서버, 통신 규약, 로컬 DB는 건드리지 않습니다. "
+    "카카오톡 조작은 여기 있는 도구로만 하고, 창 메시지나 클립보드를 다루는 코드를 따로 짜지 마세요. "
+    "방은 창 제목과 글자 하나까지 같은 이름으로 지정합니다. 같은 이름의 창이 둘 이상이면 도구가 멈춥니다. "
+    "닫혀 있는 방은 kakaotalk_win_open으로 먼저 여세요. "
+    "읽기 결과는 대화창에 불러와 있는 메시지까지입니다. 얼마나 읽었는지는 coverage에 나옵니다. "
+    "결과를 이어서 받을 때는 응답의 nextOffset과 snapshotId를 그대로 넘기고, "
+    "도중에 대화가 바뀌었다는 snapshot_changed가 나오면 offset 0으로 돌아가 새로 받으세요. "
+    "rooms의 방 이름은 화면 글자 인식 결과라 틀릴 수 있으니 이미지와 대조하세요. "
+    "메시지는 사용자가 직접 말한 방에, 사용자가 말한 내용만 보냅니다. "
+    "전송 요청 하나에 operation_id 하나를 만들고, 그 요청을 다시 확인할 때도 같은 값을 씁니다. "
+    "어느 방인지, 무엇을 보낼지 분명하지 않으면 묻고 나서 보내세요. 문장을 대신 지었다면 보내기 전에 사용자에게 보여 주세요. "
+    "dispatched=false인 blocked 응답은 입력도 전송도 일어나지 않았다는 뜻이니, 같은 이유로 다시 호출하지 마세요. "
+    "결과가 outcome_unknown이면 새로 보내지 말고 kakaotalk_win_send_result에 같은 operation_id를 넣어 상태만 확인하세요. "
+    "새 채팅방 만들기, 친구 추가와 초대, 오픈채팅 참여, 여러 방에 같은 글 보내기, 예약 발송 기능은 없습니다. "
+    "safety_stop_active가 나오면 카카오톡 화면에 안내가 떠 있는지 사용자에게 확인을 부탁하세요. 정지 해제는 사용자가 터미널에서만 할 수 있습니다. "
+    "대화에는 다른 사람의 개인정보가 담겨 있습니다. 요청받은 범위를 넘어 저장하거나 다른 곳에 옮기지 마세요."
 ))
-READ = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
-UI = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)
-NAVIGATE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False)
-SEND = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True)
 
 
-def output(value):
-    return json.dumps(value, ensure_ascii=False, indent=2)
+def _hints(*, read_only, repeat_safe, external=False):
+    """MCP tool hints. Nothing here deletes anything; only sending reaches other people."""
+    return ToolAnnotations(readOnlyHint=read_only, destructiveHint=False,
+                           idempotentHint=repeat_safe, openWorldHint=external)
 
 
-def ops():
+LOOK = _hints(read_only=True, repeat_safe=True)          # reads only
+WINDOW = _hints(read_only=False, repeat_safe=True)       # opens/closes windows, sets the search box back
+SCROLL = _hints(read_only=False, repeat_safe=False)      # moves the view or writes a capture file
+DELIVER = _hints(read_only=False, repeat_safe=False, external=True)
+
+Reply = list[TextContent | ImageContent]
+
+
+def _json(value):
+    return json.dumps(value, indent=2, ensure_ascii=False)
+
+
+def _app():
     from .operations import KakaoTalkWin
     return KakaoTalkWin()
 
 
-def with_image(result, always=False):
-    content: list[TextContent | ImageContent] = [TextContent(type="text", text=output(result))]
-    if result.get("status") == "ok" and result.get("imagePath") and always:
-        content.append(Image(path=result["imagePath"]).to_image_content())
-    return content
+def _with_picture(result, attach):
+    parts = [TextContent(type="text", text=_json(result))]
+    picture = result.get("imagePath")
+    if attach and picture and result.get("status") == "ok":
+        parts.append(Image(path=picture).to_image_content())
+    return parts
 
 
-@mcp.tool(annotations=READ)
+def _ocr_failed(result):
+    return (result.get("ocr") or {}).get("status") != "ok"
+
+
+@mcp.tool(annotations=LOOK)
 def kakaotalk_win_status() -> str:
-    """카카오톡 PC 실행·서명·잠금 상태, 열린 대화창 수, 클립보드 기록 설정, 전송 안전 한도를 확인합니다.
+    """카카오톡 PC가 켜져 있는지, 정식 서명 파일인지, 잠겨 있는지와 열린 대화창 수, 클립보드 기록 설정, 전송 한도를 알려 줍니다.
 
-    메시지를 읽거나 창을 바꾸지 않습니다. warnings가 있으면 사용자에게 알리세요.
+    메시지는 읽지 않고 창 상태도 그대로 둡니다. 응답에 warnings가 있으면 사용자에게 전해 주세요.
     """
-    return output(ops().status())
+    return _json(_app().status())
 
 
-@mcp.tool(annotations=READ)
+@mcp.tool(annotations=LOOK)
 def kakaotalk_win_windows() -> str:
-    """열린 대화창의 정확한 제목, 최소화 여부, 입력 중인 초안 유무를 반환합니다.
+    """지금 떠 있는 대화창마다 정확한 제목, 최소화 여부, 입력창에 쓰다 만 글이 있는지를 돌려줍니다.
 
-    방을 열거나 창을 올리지 않으며 메시지 본문·초안 내용은 읽지 않습니다.
-    여기 나온 windowTitle을 다른 도구에 그대로 전달하세요. 닫힌 방 목록은 kakaotalk_win_rooms를 쓰세요.
+    새로 열거나 앞으로 가져오는 창은 없고, 메시지와 쓰다 만 글의 내용도 읽지 않습니다.
+    다른 도구에는 여기 나온 windowTitle을 고치지 말고 넘기세요. 열려 있지 않은 방은 kakaotalk_win_rooms로 찾습니다.
     """
-    return output(ops().windows())
+    return _json(_app().windows())
 
 
-@mcp.tool(annotations=UI)
-def kakaotalk_win_rooms(query: str = "", include_image: bool = False) -> list[TextContent | ImageContent]:
-    """메인 창 채팅 목록에서 현재 보이는 행을 캡처해 Windows 내장 OCR로 방 이름·미리보기·시각을 읽습니다.
+@mcp.tool(annotations=WINDOW)
+def kakaotalk_win_rooms(query: str = "", include_image: bool = False) -> Reply:
+    """메인 창의 채팅 목록 중 화면에 보이는 줄을 캡처하고 Windows OCR로 방 이름, 미리보기, 시각을 읽습니다.
 
-    query를 주면 앱의 채팅방 검색칸에 넣은 결과를 읽고, 끝나면 검색칸을 원래대로 되돌립니다.
-    보이는 행만이며 전체 목록이 아닙니다. OCR 오인식이 있을 수 있으니 open 전에 이름을 확인하세요.
-    include_image=True거나 OCR이 실패하면 목록 이미지를 함께 반환합니다.
+    query가 있으면 앱의 채팅방 검색칸에 넣어 나온 결과를 읽은 뒤, 검색칸을 원래 내용으로 돌려놓습니다.
+    목록 전체가 아니라 보이는 줄만 읽습니다. 글자 인식이 틀릴 수 있으니 방을 열기 전에 이름을 확인하세요.
+    include_image=True이거나 OCR이 실패하면 목록 이미지도 같이 보냅니다.
     """
-    result = ops().rooms(query=query)
-    return with_image(result, always=include_image or result.get("ocr", {}).get("status") != "ok")
+    result = _app().rooms(query=query)
+    return _with_picture(result, include_image or _ocr_failed(result))
 
 
-@mcp.tool(annotations=UI)
-def kakaotalk_win_search_rooms(query: str, include_image: bool = False) -> list[TextContent | ImageContent]:
-    """앱의 채팅방 검색으로 query와 일치하는 방을 찾아 OCR 결과를 반환합니다. 검색칸은 원래대로 되돌립니다."""
-    result = ops().search_rooms(query)
-    return with_image(result, always=include_image or result.get("ocr", {}).get("status") != "ok")
+@mcp.tool(annotations=WINDOW)
+def kakaotalk_win_search_rooms(query: str, include_image: bool = False) -> Reply:
+    """앱의 채팅방 검색에 query를 넣어 걸리는 방을 OCR로 읽어 옵니다. 끝나면 검색칸을 원래 내용으로 돌려놓습니다."""
+    result = _app().search_rooms(query)
+    return _with_picture(result, include_image or _ocr_failed(result))
 
 
-@mcp.tool(annotations=UI)
+@mcp.tool(annotations=WINDOW)
 def kakaotalk_win_open(window_title: str) -> str:
-    """정확한 이름의 기존 방을 앱의 채팅방 검색으로 엽니다. 창을 앞으로 띄우지 않습니다.
+    """이름이 정확히 같은 기존 방을 앱의 채팅방 검색으로 엽니다. 열린 창은 앞으로 나오지 않습니다.
 
-    이미 열려 있으면 다시 열지 않습니다. 검색 첫 결과의 제목이 다르면 그 창을 닫고 중단합니다.
-    새 방을 만들지 않습니다. existingHistory=false인 방에는 전송할 수 없습니다.
+    이미 떠 있는 방이면 그대로 둡니다. 검색 결과 맨 위 방의 제목이 다르면 그 창을 바로 닫고 멈춥니다.
+    방을 새로 만드는 일은 없습니다. existingHistory=false로 나온 방에는 메시지를 보낼 수 없습니다.
     """
-    return output(ops().open_room(window_title))
+    return _json(_app().open_room(window_title))
 
 
-@mcp.tool(annotations=UI)
+@mcp.tool(annotations=WINDOW)
 def kakaotalk_win_close(window_title: str) -> str:
-    """대화창만 닫습니다(방 나가기 아님). 입력 중인 초안이 있으면 닫지 않고 중단합니다."""
-    return output(ops().close_room(window_title))
+    """대화창을 닫기만 하고 방에서 나가지는 않습니다. 입력창에 쓰다 만 글이 있으면 닫지 않고 멈춥니다."""
+    return _json(_app().close_room(window_title))
 
 
-@mcp.tool(annotations=READ)
+@mcp.tool(annotations=LOOK)
 def kakaotalk_win_read(window_title: str, limit: int = 50, offset: int = 0, snapshot_id: str = "") -> str:
-    """열린 대화창에 불러와진 메시지를 날짜·보낸 사람·시각·본문으로 읽습니다. limit 1..500.
+    """대화창에 불러와 있는 메시지를 날짜, 보낸 사람, 시각, 본문으로 나눠 돌려줍니다. limit은 1~500입니다.
 
-    최신 메시지부터 페이지를 고르고, 페이지 안은 시간순입니다. 다음 페이지는 nextOffset/snapshotId를 넘기세요.
-    사진·동영상·이모티콘·파일은 kind=media/mediaType으로만 표시됩니다(내용은 read_attachment).
-    창을 앞으로 띄우거나 초안을 바꾸지 않으며, 사용자의 클립보드는 읽은 뒤 원래대로 복원합니다.
-    더 이전 대화는 kakaotalk_win_load_more로 불러온 뒤 다시 읽으세요.
+    가장 최근 메시지 쪽에서 limit개를 잘라 오고, 그 안에서는 오래된 것부터 놓입니다.
+    더 앞의 메시지는 응답의 nextOffset을 offset에, snapshotId를 snapshot_id에 넣어 다시 부르면 됩니다.
+    사진, 동영상, 이모티콘, 파일은 kind=media와 mediaType으로만 나옵니다. 내용을 보려면 read_attachment를 쓰세요.
+    창 위치와 쓰다 만 글은 바꾸지 않고, 잠시 쓴 클립보드는 읽은 뒤 원래 내용으로 돌려놓습니다.
+    아직 불러오지 않은 옛 대화는 kakaotalk_win_load_more를 먼저 부른 다음 읽으세요.
     """
-    return output(ops().read_messages(window_title, limit, offset, snapshot_id))
+    return _json(_app().read_messages(window_title, limit, offset, snapshot_id))
 
 
-@mcp.tool(annotations=NAVIGATE)
-def kakaotalk_win_read_attachment(window_title: str, output_path: str | None = None,
-                                  ocr: bool = False) -> list[TextContent | ImageContent]:
-    """대화창을 현재 화면 그대로 PNG로 캡처해 반환합니다(사진·이모티콘·카드 확인용).
+@mcp.tool(annotations=SCROLL)
+def kakaotalk_win_read_attachment(window_title: str, output_path: str | None = None, ocr: bool = False) -> Reply:
+    """대화창이 지금 보이는 모습 그대로를 PNG로 캡처해 돌려줍니다. 사진, 이모티콘, 카드 메시지를 볼 때 씁니다.
 
-    가려진 창도 캡처하며, 최소화된 창은 활성화하지 않고 잠시 복원했다가 되돌립니다.
-    원본 첨부 파일이 아닌 화면 해상도 이미지입니다. ocr=True일 때만 Windows OCR 결과를 덧붙이며 원문과 구분하세요.
-    output_path는 절대 경로이고, 생략하면 임시 PNG입니다.
+    다른 창에 가려 있어도 캡처되고, 최소화된 창은 포커스를 주지 않고 잠깐 펼쳤다가 다시 내립니다.
+    받은 파일 원본이 아니라 화면에 보이는 해상도의 그림입니다.
+    ocr=True면 Windows OCR로 읽은 글자를 붙이는데, 실제 메시지 본문과는 따로 다루세요.
+    output_path는 절대 경로로 주고, 비워 두면 임시 PNG 파일에 저장합니다.
     """
-    return with_image(ops().capture(window_title, output_path, ocr), always=True)
+    return _with_picture(_app().capture(window_title, output_path, ocr), attach=True)
 
 
-@mcp.tool(annotations=UI)
+@mcp.tool(annotations=WINDOW)
 def kakaotalk_win_read_many(window_titles: list[str], limit: int = 50, open_if_needed: bool = True,
                             close_after: bool = False) -> str:
-    """1~10개 방을 차례로(필요하면 열어서) 읽습니다. 클립보드가 하나라 병렬로 읽지 않습니다.
+    """방 1~10개를 하나씩 차례로 읽고, 닫혀 있으면 열어서 읽습니다. 클립보드를 하나만 쓰므로 동시에 읽지 않습니다.
 
-    방별 결과와 실패를 따로 반환하며 같은 시점의 스냅샷은 아닙니다.
-    close_after=True면 이 호출이 새로 연 창만 닫습니다. 기존 창과 초안은 보존합니다.
+    방마다 결과나 실패 이유가 따로 나오고, 방끼리 읽은 시점은 조금씩 다릅니다.
+    close_after=True로 부르면 읽으려고 새로 띄운 창은 끝난 뒤 닫고, 원래 떠 있던 창과 쓰다 만 글은 건드리지 않습니다.
     """
-    return output(ops().read_many(window_titles, limit, open_if_needed, close_after))
+    return _json(_app().read_many(window_titles, limit, open_if_needed, close_after))
 
 
-@mcp.tool(annotations=NAVIGATE)
+@mcp.tool(annotations=SCROLL)
 def kakaotalk_win_load_more(window_title: str, pages: int = 1) -> str:
-    """대화 목록을 위로 스크롤해 이전 메시지를 최대 pages(1..10)번 불러오고, 끝나면 맨 아래로 되돌립니다.
+    """메시지 목록을 위로 올려 옛 메시지를 최대 pages번(1~10) 더 불러오고, 마지막에 맨 아래로 돌아갑니다.
 
-    늘어나지 않았다고 대화의 시작에 도달했다고 판단하지 마세요(historyComplete=false).
+    메시지 수가 늘지 않았다고 대화의 처음까지 왔다고 보면 안 됩니다. historyComplete는 항상 false입니다.
     """
-    return output(ops().load_more(window_title, pages))
+    return _json(_app().load_more(window_title, pages))
 
 
-@mcp.tool(annotations=NAVIGATE)
+@mcp.tool(annotations=SCROLL)
 def kakaotalk_win_search(window_title: str, query: str, limit: int = 100, load_pages: int = 0,
                          case_sensitive: bool = False, context_rows: int = 2) -> str:
-    """불러와진 메시지에서 본문·보낸 사람을 문자 그대로 검색하고 앞뒤 context_rows개를 함께 반환합니다.
+    """불러와 있는 메시지의 본문과 보낸 사람에서 query 글자를 찾고, 찾은 메시지 앞뒤로 context_rows개씩 붙여 줍니다.
 
-    load_pages=1..10이면 먼저 이전 대화를 불러옵니다. 앱의 검색 UI는 쓰지 않습니다.
-    결과는 searchScope 범위에 한정되며 전체 과거의 모든 일치를 보장하지 않습니다.
+    load_pages를 1~10으로 주면 옛 메시지를 그만큼 먼저 불러온 다음 찾습니다. 앱의 대화 검색 화면은 열지 않습니다.
+    찾는 범위는 searchScope에 적힌 곳까지라, 이 방의 모든 과거 대화에서 찾았다는 뜻은 아닙니다.
     """
-    return output(ops().search_messages(window_title, query, limit, load_pages, case_sensitive, context_rows))
+    return _json(_app().search_messages(window_title, query, limit, load_pages, case_sensitive, context_rows))
 
 
-@mcp.tool(annotations=SEND)
-def kakaotalk_win_send(window_title: str, text: str, operation_id: str, wait_seconds: float = 8,
-                       require_self: bool = False) -> str:
-    """기존 방에 텍스트 한 건을 보냅니다. 사용자가 요청한 방과 본문만 보내세요.
+@mcp.tool(annotations=DELIVER)
+def kakaotalk_win_send(
+    window_title: str,
+    text: str,
+    operation_id: str,
+    wait_seconds: float = 8,
+    require_self: bool = False,
+) -> str:
+    """대화 기록이 있는 방에 글 한 건을 보냅니다. 사용자가 지정한 방과 내용만 보내세요.
 
-    사용자가 확인창 모드(confirmSend=dialog)를 켰다면 PC에 확인창이 뜨고 [예]를 눌러야 전송됩니다.
-    operation_id는 요청마다 한 번 만들어 재사용하세요. 같은 ID는 다시 입력하지 않고 결과만 다시 확인합니다.
-    대화 기록이 없는 방, 초안이 있는 방, 전송 간격·시간당·일일 한도 초과, 같은 긴 문구의 다른 방 전송은 차단됩니다.
-    observed_in_window는 새 메시지와 빈 입력창을 관찰했다는 뜻이며 서버 수신·상대 읽음 확인이 아닙니다.
-    outcome_unknown이나 타임아웃이면 재전송하지 말고 kakaotalk_win_send_result로만 확인하세요.
-    require_self=True는 '나와의 채팅'(설정한 내 이름과 제목·보낸 사람이 모두 같음)만 허용합니다.
+    사용자가 확인창 모드(confirmSend=dialog)를 켜 두었다면 PC에 확인창이 뜨고, [예]를 눌러야 나갑니다.
+    operation_id는 전송 요청마다 새로 정하고, 같은 요청을 다시 부를 때는 같은 값을 씁니다. 같은 ID로는 다시 입력하지 않고 결과만 확인합니다.
+    대화 기록이 없는 방, 쓰다 만 글이 있는 방, 간격·시간당·하루 한도를 넘은 경우, 긴 글을 다른 방에도 똑같이 보내려는 경우는 막힙니다.
+    observed_in_window는 대화창에 새 메시지가 보이고 입력창이 비었다는 뜻일 뿐, 서버가 받았거나 상대가 읽었다는 뜻이 아닙니다.
+    outcome_unknown이나 시간 초과가 나오면 새로 보내지 말고 kakaotalk_win_send_result로 확인만 하세요.
+    require_self=True면 '나와의 채팅'에만 보냅니다. 방 제목과 보낸 사람이 모두 설정한 내 이름과 같아야 합니다.
     """
-    return output(ops().send_message(window_title, text, operation_id, wait_seconds, require_self))
+    return _json(_app().send_message(window_title, text, operation_id, wait_seconds, require_self))
 
 
-@mcp.tool(annotations=READ)
+@mcp.tool(annotations=LOOK)
 def kakaotalk_win_send_result(operation_id: str, wait_seconds: float = 0) -> str:
-    """전송 기록을 조회하고, 확정되지 않았으면 읽기만으로 다시 확인합니다. 창을 열거나 다시 보내지 않습니다."""
-    return output(ops().send_result(operation_id, wait_seconds))
+    """기록해 둔 전송 결과를 알려 주고, 아직 확정되지 않았으면 대화창을 읽어서만 다시 확인합니다. 창을 열거나 다시 보내지는 않습니다."""
+    return _json(_app().send_result(operation_id, wait_seconds))
 
 
 def main():
-    mcp.run(transport="stdio")
+    mcp.run("stdio")
 
 
 if __name__ == "__main__":
