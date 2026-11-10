@@ -14,7 +14,7 @@ mcp = FastMCP("kakaotalk-win", instructions=(
     "읽기 결과는 대화창에 불러와 있는 메시지까지입니다. 얼마나 읽었는지는 coverage에 나옵니다. "
     "결과를 이어서 받을 때는 응답의 nextOffset과 snapshotId를 그대로 넘기고, "
     "도중에 대화가 바뀌었다는 snapshot_changed가 나오면 offset 0으로 돌아가 새로 받으세요. "
-    "rooms의 방 이름은 화면 글자 인식 결과라 틀릴 수 있으니 이미지와 대조하세요. "
+    "rooms의 방 이름은 화면 글자 인식 결과라 틀릴 수 있으니, 확인이 필요하면 include_image=True로 이미지를 받아 대조하세요. "
     "메시지는 사용자가 직접 말한 방에, 사용자가 말한 내용만 보냅니다. "
     "전송 요청 하나에 operation_id 하나를 만들고, 그 요청을 다시 확인할 때도 같은 값을 씁니다. "
     "어느 방인지, 무엇을 보낼지 분명하지 않으면 묻고 나서 보내세요. 문장을 대신 지었다면 보내기 전에 사용자에게 보여 주세요. "
@@ -50,11 +50,21 @@ def _app():
 
 
 def _with_picture(result, attach):
-    parts = [TextContent(type="text", text=_json(result))]
+    """Text result plus, when asked, the captured images. Temporary capture files are deleted
+    before returning: the pictures travel inside the reply, and screenshots of conversations
+    must not pile up on disk. A file saved to a caller's output_path is kept."""
+    from . import capture
     pictures = result.get("imagePaths") or ([result["imagePath"]] if result.get("imagePath") else [])
+    images = []
     if attach and result.get("status") == "ok":
-        parts.extend(Image(path=picture).to_image_content() for picture in pictures)
-    return parts
+        images = [Image(path=picture).to_image_content() for picture in pictures]
+    kept = [picture for picture in pictures if not capture.is_temporary(picture)]
+    if capture.discard(pictures):
+        result = dict(result, imagePath=kept[0] if kept else None, temporaryImagesDeleted=True,
+                      imagesAttached=bool(images))
+        if "imagePaths" in result:
+            result["imagePaths"] = kept
+    return [TextContent(type="text", text=_json(result))] + images
 
 
 def _ocr_failed(result):
@@ -89,6 +99,7 @@ def kakaotalk_win_rooms(query: str = "", pages: int = 1, include_image: bool = F
     query가 있으면 앱의 채팅방 검색칸에 넣어 나온 결과를 읽은 뒤, 검색칸을 원래 내용으로 돌려놓습니다.
     글자 인식이 틀릴 수 있으니 방을 열기 전에 이름을 확인하세요(nameVariants는 아이콘이 글자로 읽혔을 때의 후보).
     include_image=True이거나 OCR이 실패하면 캡처한 목록 이미지도 같이 보냅니다.
+    캡처 파일은 응답을 만든 뒤 바로 지웁니다(대화 목록이 디스크에 남지 않도록). 이미지가 필요하면 include_image=True로 받으세요.
     """
     result = _app().rooms(query=query, pages=pages)
     return _with_picture(result, include_image or _ocr_failed(result))
@@ -150,7 +161,7 @@ def kakaotalk_win_read_attachment(window_title: str, output_path: str | None = N
     다른 창에 가려 있어도 캡처되고, 최소화된 창은 포커스를 주지 않고 잠깐 펼쳤다가 다시 내립니다.
     받은 파일 원본이 아니라 화면에 보이는 해상도의 그림입니다.
     ocr=True면 Windows OCR로 읽은 글자를 붙이는데, 실제 메시지 본문과는 따로 다루세요.
-    output_path는 절대 경로로 주고, 비워 두면 임시 PNG 파일에 저장합니다.
+    output_path는 절대 경로로 주면 그 파일이 남습니다. 비워 두면 이미지는 응답에만 담고 임시 파일은 바로 지웁니다.
     """
     return _with_picture(_app().capture(window_title, output_path, ocr), attach=True)
 

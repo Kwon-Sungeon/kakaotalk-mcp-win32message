@@ -46,7 +46,7 @@ PowerShell에서 실행합니다. 원하는 폴더에 가상 환경을 만들고
 
 ```powershell
 py -3 -m venv "$env:USERPROFILE\.kakaotalk-win"
-& "$env:USERPROFILE\.kakaotalk-win\Scripts\pip" install "https://github.com/Kwon-Sungeon/kakaotalk-mcp-win32message/releases/download/v0.1.2/kakaotalk_win-0.1.2-py3-none-any.whl"
+& "$env:USERPROFILE\.kakaotalk-win\Scripts\pip" install "https://github.com/Kwon-Sungeon/kakaotalk-mcp-win32message/releases/download/v0.1.3/kakaotalk_win-0.1.3-py3-none-any.whl"
 ```
 
 소스코드를 수정하려면 git 저장소를 받아 설치합니다.
@@ -213,7 +213,7 @@ kakaotalk-win call send_message --args-file C:\path\request.json
 가능성을 0으로 만들 수는 없습니다. 공식 앱 창에 메시지를 보내는 방식만으로 제한됐다는 보고는 찾지 못했습니다. 그래도 카카오는 이용 패턴을 분석해 보호조치를 합니다. 그래서 사람이 평소에 쓰는 속도와 방식을 넘지 않도록 한도를 걸어 두었습니다.
 
 **대화 내용은 어디로 가나요?**
-kakaotalk-win은 대화를 내 PC 밖으로 보내지 않고 저장하지도 않습니다. 다만 AI 클라이언트는 도구 결과를 AI 모델에 보내므로, 읽은 대화는 사용하는 AI 서비스에 전달됩니다. 다른 사람의 대화를 다룰 때는 이 점을 고려하세요.
+kakaotalk-win은 대화를 내 PC 밖으로 보내지 않고 저장하지도 않습니다. 채팅 목록이나 대화창을 캡처한 이미지도 응답에 담은 뒤 바로 지웁니다. 저장 경로를 직접 지정한 경우에만 파일이 남고, 명령줄에서 만든 임시 캡처는 1시간이 지나면 정리됩니다. 다만 AI 클라이언트는 도구 결과를 AI 모델에 보내므로, 읽은 대화는 사용하는 AI 서비스에 전달됩니다. 다른 사람의 대화를 다룰 때는 이 점을 고려하세요.
 
 **전체 대화 기록을 읽을 수 있나요?**
 대화창에 불러온 메시지까지만 읽습니다. `load_more`로 더 불러올 수 있지만, 처음까지 다 읽었다고 보장하지는 않습니다. 오래된 대화 전체가 필요하면 카카오톡의 공식 '대화 내용 내보내기'를 쓰는 편이 정확합니다.

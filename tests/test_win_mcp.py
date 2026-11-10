@@ -1,13 +1,16 @@
 import io
 import json
+import os
 import sys
+import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
 if sys.platform != "win32":
     raise unittest.SkipTest("kakaotalk_win requires Windows")
 
-from kakaotalk_win import cli, mcp_server  # noqa: E402
+from kakaotalk_win import capture, cli, mcp_server  # noqa: E402
 from kakaotalk_win.operations import _has_red_badge, _match_shortened, _merge_pages, _rows_from_ocr  # noqa: E402
 
 EXPECTED = {"kakaotalk_win_status", "kakaotalk_win_windows", "kakaotalk_win_rooms", "kakaotalk_win_search_rooms",
@@ -49,6 +52,46 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
             ops.return_value.rooms.return_value = {"status": "ok", "imagePath": "x.png",
                                                    "ocr": {"status": "ocr_failed"}}
             self.assertEqual([part.type for part in mcp_server.kakaotalk_win_rooms()], ["text", "image"])
+
+    async def test_temporary_captures_are_deleted_after_the_reply(self):
+        image = (4, 4, b"\xff" * 64)
+        attached, hidden = capture.save_png(image), capture.save_png(image)
+        with tempfile.TemporaryDirectory() as folder:
+            chosen = os.path.join(folder, "mine.png")
+            capture.save_png(image, chosen)
+            with patch("kakaotalk_win.operations.KakaoTalkWin") as ops:
+                ops.return_value.capture.return_value = {"status": "ok", "imagePath": attached}
+                parts = mcp_server.kakaotalk_win_read_attachment("방")
+                self.assertEqual([part.type for part in parts], ["text", "image"])  # read before deletion
+                self.assertTrue(json.loads(parts[0].text)["temporaryImagesDeleted"])
+                ops.return_value.rooms.return_value = {"status": "ok", "imagePath": hidden, "imagePaths": [hidden],
+                                                       "ocr": {"status": "ok"}}
+                reply = json.loads(mcp_server.kakaotalk_win_rooms()[0].text)
+                self.assertEqual((reply["imagePath"], reply["imagePaths"]), (None, []))
+                ops.return_value.capture.return_value = {"status": "ok", "imagePath": chosen}
+                mcp_server.kakaotalk_win_read_attachment("방", chosen)
+            self.assertFalse(os.path.exists(attached) or os.path.exists(hidden))
+            self.assertTrue(os.path.exists(chosen))  # a file the caller asked for is kept
+
+
+class CaptureCleanupTests(unittest.TestCase):
+    def test_only_own_temporary_captures_count(self):
+        path = capture.save_png((2, 2, b"\x00" * 16))
+        try:
+            self.assertTrue(capture.is_temporary(path))
+            self.assertFalse(capture.is_temporary(os.path.join(os.path.dirname(path), "other.png")))
+            self.assertFalse(capture.is_temporary(r"C:\somewhere\kakaotalk-win-x.png"))
+        finally:
+            capture.discard([path])
+        self.assertFalse(os.path.exists(path))
+
+    def test_old_captures_are_swept(self):
+        old, new = capture.save_png((2, 2, b"\x00" * 16)), capture.save_png((2, 2, b"\x00" * 16))
+        os.utime(old, (time.time() - 7200, time.time() - 7200))
+        capture.sweep_temporary()
+        self.assertFalse(os.path.exists(old))
+        self.assertTrue(os.path.exists(new))
+        capture.discard([new])
 
 
 class CliTests(unittest.TestCase):

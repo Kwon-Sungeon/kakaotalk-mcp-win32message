@@ -580,6 +580,7 @@ class KakaoTalkWin:
         began, now = time.monotonic(), datetime.now()
         since = now - timedelta(minutes=minutes)
         listing = self.rooms(pages=list_pages)
+        cap.discard(listing.get("imagePaths"))  # only the OCR'd rows are needed; never keep the screenshots
         if listing.get("status") != "ok" or "items" not in listing:
             return listing if listing.get("status") != "ok" else _blocked("room_list_unreadable", ocr=listing.get("ocr"))
         rows = listing["items"]

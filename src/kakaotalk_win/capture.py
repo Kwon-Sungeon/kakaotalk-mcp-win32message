@@ -11,6 +11,7 @@ import os
 import struct
 import subprocess
 import tempfile
+import time
 import zlib
 from pathlib import Path
 
@@ -86,16 +87,66 @@ def png_bytes(image):
             chunk(b"IDAT", zlib.compress(bytes(raw), 6)) + chunk(b"IEND", b""))
 
 
+TEMP_PREFIX = "kakaotalk-win-"
+TEMP_MAX_AGE = 3600  # seconds; captures show other people's conversations, so they never pile up
+
+
 def save_png(image, output_path=None):
-    """Write the PNG to output_path, which must not exist yet, or to a new private temporary file."""
+    """Write the PNG to output_path, which must not exist yet, or to a new private temporary file.
+
+    Temporary captures are meant to be deleted by the caller once used (see discard). As a
+    backstop, temporary captures older than an hour are removed whenever a new one is made.
+    """
     data = png_bytes(image)
     if output_path:
         target = open(output_path, "xb")  # "x" refuses to overwrite an existing file
     else:
-        target = tempfile.NamedTemporaryFile(prefix="kakaotalk-win-", suffix=".png", delete=False)
+        sweep_temporary()
+        target = tempfile.NamedTemporaryFile(prefix=TEMP_PREFIX, suffix=".png", delete=False)
     with target:
         target.write(data)
     return str(Path(target.name))
+
+
+def is_temporary(path):
+    """True for a capture this package wrote to the temp folder (never for a caller's output_path)."""
+    try:
+        candidate = Path(path)
+        return (candidate.name.startswith(TEMP_PREFIX) and candidate.suffix == ".png"
+                and candidate.parent.resolve() == Path(tempfile.gettempdir()).resolve())
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def discard(paths):
+    """Delete the temporary captures among `paths`; returns how many were removed."""
+    removed = 0
+    for path in paths or ():
+        if path and is_temporary(path):
+            try:
+                os.remove(path)
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
+def sweep_temporary(max_age=TEMP_MAX_AGE):
+    """Remove temporary captures older than max_age seconds (left by the CLI or an interrupted call)."""
+    cutoff = time.time() - max_age
+    try:
+        entries = list(Path(tempfile.gettempdir()).glob(TEMP_PREFIX + "*.png"))
+    except OSError:
+        return 0
+    removed = 0
+    for entry in entries:
+        try:
+            if entry.stat().st_mtime < cutoff:
+                entry.unlink()
+                removed += 1
+        except OSError:
+            pass
+    return removed
 
 
 def difference(a, b, step=4):
