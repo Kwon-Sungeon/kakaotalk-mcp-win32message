@@ -230,7 +230,17 @@ class KakaoTalkWin:
                 recognized = _ocr_list_page(path, listing, scale)
                 statuses.append(recognized.get("status"))
                 if recognized.get("status") == "ok":
-                    rows = _rows_from_ocr(recognized.get("lines", []), listing, scale, last_page=path == paths[-1])
+                    last = path == paths[-1]
+                    rows = _rows_from_ocr(recognized.get("lines", []), listing, scale, last, positions=True)
+                    if any(row.get("nameUnreadable") for row in rows):
+                        # A second look at the untouched capture, enlarged (cubic): a short name missed at
+                        # 1x is read at 2x. Small scales already used 2x (darkened) for the first pass.
+                        again = cap.ocr(path, zoom=2 if scale >= SMALL_SCALE else 3)
+                        if again.get("status") == "ok":
+                            _fill_unread_names(rows, _rows_from_ocr(again.get("lines", []), listing, scale, last,
+                                                                    positions=True), scale)
+                    for row in rows:
+                        row.pop("_top", None)
                     badges.append((listing, rows))
                     page_rows.append(rows)
             _read_badge_numbers(badges, zoom=max(2, round(2 / scale)))  # smaller digits at lower system scales
@@ -243,7 +253,8 @@ class KakaoTalkWin:
                           "leading character). Check the images; open_room needs the exact room name. "
                           "hasUnread comes from the red badge colour; unread is the badge number when legible. "
                           "previewUnreadable=true: the row shows a preview OCR could not read (often a one-word "
-                          "reply); read the room for its content.")
+                          "reply); read the room for its content. nameUnreadable=true: a room is there (its "
+                          "time was read) but not its name; check the image.")
         return result
 
     def search_rooms(self, query, pages=1):
@@ -595,6 +606,9 @@ class KakaoTalkWin:
         read_titles = set()
         for row in candidates[:max_rooms]:
             summary = {key: row.get(key) for key in ("name", "timeText", "preview", "hasUnread", "unread")}
+            if not row.get("name"):  # OCR could not read the name: nothing safe to match or open
+                not_read.append(dict(summary, reason="name_unreadable"))
+                continue
             title = _match_title(row, open_titles, claimed)
             if title in read_titles:  # two list rows resolved to one window: do not read or report it twice
                 not_read.append(dict(summary, reason="ambiguous_room_name"))
@@ -1004,14 +1018,17 @@ def _read_badge_numbers(pages, zoom=2):
                 break
 
 
-def _rows_from_ocr(lines, image, scale=1.0, last_page=True):
+def _rows_from_ocr(lines, image, scale=1.0, last_page=True, positions=False):
     """Group OCR lines of one room-list capture into rooms.
 
     A room is a profile picture, the name (with member count) and up to two preview
     lines; the time sits right of the name and the unread badge right of the preview.
     Lines are grouped by the vertical gap between them. Rows cut by the top edge are
     dropped (the previous page held them); rows cut by the bottom edge are kept only
-    on the last page, marked partial.
+    on the last page, marked partial. A time label with no name next to it is still a
+    room: OCR sometimes misses a short name entirely. Such rows come back with
+    name=None and nameUnreadable=true rather than disappearing. positions=True keeps the
+    row's vertical position (_top) for a second OCR pass to fill the name in.
     """
     width, height = image[0], image[1]
     usable = [line for line in _split_columns(lines, width)
@@ -1033,7 +1050,7 @@ def _rows_from_ocr(lines, image, scale=1.0, last_page=True):
             clusters[-1].append(line)
         else:
             clusters.append([line])
-    rows = []
+    rows, dropped = [], []
     for number, cluster in enumerate(clusters):
         head = cluster[0]
         beside = sorted((line for line in cluster[1:] if abs(line["top"] - head["top"]) < line_height * 0.6),
@@ -1041,6 +1058,7 @@ def _rows_from_ocr(lines, image, scale=1.0, last_page=True):
         below = [line for line in cluster[1:] if line not in beside]
         top, bottom = min(line["top"] for line in cluster), max(line["bottom"] for line in cluster)
         if top < EDGE_MARGIN * scale:
+            dropped.append((top, bottom))
             continue
         # The row's own extent, independent of what OCR found: a missed preview line must not
         # shorten the area searched for the badge, which sits beside the preview.
@@ -1054,6 +1072,7 @@ def _rows_from_ocr(lines, image, scale=1.0, last_page=True):
             row["badgeBox"] = badge  # read by _read_badge_numbers, then removed
         if bottom > height - EDGE_MARGIN * scale or (not below and top > height - ROW_PITCH * 0.6 * scale):
             if not last_page:
+                dropped.append((top, bottom))
                 continue
             row["partial"] = True
         elif not below and _has_ink(image, int(AVATAR_EDGE * scale), int(bottom + 2),
@@ -1063,26 +1082,82 @@ def _rows_from_ocr(lines, image, scale=1.0, last_page=True):
     for mark in marks:
         center = (mark["top"] + mark["bottom"]) / 2
         near = [row for row in rows if row["_top"] - line_height <= center <= row["_bottom"] + line_height * 1.5]
+        text = mark["text"].strip()
         if not near:
+            if _TIMEISH.match(text) and not any(top - line_height <= center <= bottom + line_height * 1.5
+                                                for top, bottom in dropped):
+                orphan = _nameless_row(mark, image, scale, rows, last_page)
+                if orphan:
+                    rows.append(orphan)
             continue
         row = min(near, key=lambda item: abs((item["_top"] + item["_bottom"]) / 2 - center))
-        text = mark["text"].strip()
         if _TIMEISH.match(text):
             row["timeText"] = row["timeText"] or _clean_time(text)
         elif text != "0" and row["unread"] is None:  # the badge circle alone is often read as "0"
             row["unread"] = text
-    return [{key: value for key, value in row.items() if not key.startswith("_")} for row in rows]
+    rows.sort(key=lambda row: row["_top"])
+    keep = ("_top",) if positions else ()
+    return [{key: value for key, value in row.items() if key in keep or not key.startswith("_")} for row in rows]
+
+
+def _nameless_row(mark, image, scale, rows, last_page):
+    """A room known only from its time label (name and preview both missed by OCR), or None."""
+    width, height = image[0], image[1]
+    top, bottom = mark["top"], mark["bottom"]
+    if top < EDGE_MARGIN * scale:
+        return None
+    following = [row["_top"] for row in rows if row["_top"] > bottom]
+    row_end = int(min(top + ROW_PITCH * 0.8 * scale, min(following, default=height) - 1, height))
+    badge = _red_badge_box(image, int(top), row_end)
+    row = {"name": None, "memberCount": None, "nameUnreadable": True, "preview": None,
+           "timeText": _clean_time(mark["text"].strip()), "unread": None,
+           "hasUnread": (badge is not None) if image[2] else None, "_top": top, "_bottom": bottom}
+    if badge:
+        row["badgeBox"] = badge
+    if top > height - ROW_PITCH * 0.6 * scale:
+        if not last_page:
+            return None
+        row["partial"] = True
+    elif _has_ink(image, int(AVATAR_EDGE * scale), int(bottom + 2), int(width * RIGHT_COLUMN), row_end):
+        row["previewUnreadable"] = True
+    return row
+
+
+def _fill_unread_names(rows, second, scale):
+    """Copy name and preview from a second OCR pass into rows that came back nameless."""
+    for row in rows:
+        if not row.get("nameUnreadable"):
+            continue
+        match = next((other for other in second if other.get("name") and not other.get("nameUnreadable")
+                      and abs(other["_top"] - row["_top"]) <= ROW_PITCH * 0.3 * scale
+                      and other.get("timeText") in (None, row.get("timeText"))), None)
+        if match is None:
+            continue
+        for key in ("name", "memberCount", "rawName", "nameVariants"):
+            if match.get(key) is not None:
+                row[key] = match[key]
+        if match.get("preview") and not row.get("preview"):
+            row["preview"] = match["preview"]
+            row.pop("previewUnreadable", None)
+        row.pop("nameUnreadable", None)
 
 
 def _completeness(row):
-    filled = sum(row.get(key) is not None for key in ("preview", "timeText", "unread", "memberCount"))
-    return filled - (2 if row.get("partial") else 0)
+    filled = sum(row.get(key) is not None for key in ("name", "preview", "timeText", "unread", "memberCount"))
+    return filled + (2 if row.get("name") is not None else 0) - (2 if row.get("partial") else 0)
 
 
-def _same_room(seen, row):
+def _same_room(seen, row, in_overlap=False):
+    """Whether a row of a new page repeats a row of the previous one.
+
+    A nameless row (nameUnreadable) has only its time; different rooms often share a
+    time label, so it is matched only inside the overlap between the two pages.
+    """
+    times = (seen.get("timeText"), row.get("timeText"))
+    if seen["name"] is None or row["name"] is None:
+        return in_overlap and times[0] is not None and times[0] == times[1]
     if seen["name"] != row["name"]:
         return False
-    times = (seen.get("timeText"), row.get("timeText"))
     return None in times or times[0] == times[1]
 
 
@@ -1091,8 +1166,11 @@ def _merge_pages(page_rows):
     merged = []
     for rows in page_rows:
         previous = merged[-6:]
-        for row in rows:
-            twin = next((seen for seen in previous if _same_room(seen, row)), None)
+        overlap = merged[-2:]  # pages overlap by about one row
+        for place, row in enumerate(rows):
+            twin = next((seen for seen in previous
+                         if _same_room(seen, row, in_overlap=place < 2 and any(seen is item for item in overlap))),
+                        None)
             if twin is None:
                 merged.append(row)
             elif _completeness(row) > _completeness(twin):

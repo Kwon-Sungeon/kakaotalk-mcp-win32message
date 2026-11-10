@@ -131,6 +131,64 @@ class RoomRowTests(unittest.TestCase):
         self.assertTrue(operations._has_ink(paint(blank, (20, 10, 60, 30), (60, 60, 60)), 0, 0, 200, 40))
 
 
+class NamelessRowTests(unittest.TestCase):
+    """OCR read a room's time but neither its short name nor its one-word preview."""
+
+    WIDTH, HEIGHT = 651, 400
+
+    @staticmethod
+    def line(text, left, top, right, bottom):
+        return {"text": text, "left": left, "top": top, "right": right, "bottom": bottom,
+                "words": [{"text": text, "left": left, "top": top, "right": right, "bottom": bottom}]}
+
+    def lines(self):
+        return [self.line("주말 등산 모임", 120, 33, 260, 48), self.line("내일 봐요", 120, 62, 200, 76),
+                self.line("오후 3:10", 550, 33, 618, 46),
+                self.line("오후 2:58", 550, 138, 618, 151),            # the room below: name and preview missed
+                self.line("AB 프로젝트방", 120, 243, 250, 258), self.line("확인했습니다", 120, 272, 230, 286),
+                self.line("오후 2:26", 550, 243, 618, 256)]
+
+    def image(self):
+        image = solid(self.WIDTH, self.HEIGHT, (255, 255, 255))
+        image = paint(image, (122, 140, 160, 154), (30, 30, 30))       # the unread name
+        image = paint(image, (122, 168, 140, 182), (90, 90, 90))       # the unread preview
+        return paint(image, (593, 164, 618, 189), (107, 122, 255))     # and an unread badge
+
+    def test_a_time_without_a_name_is_kept_as_a_room(self):
+        rows = operations._rows_from_ocr(self.lines(), self.image(), 1.0)
+        self.assertEqual([row["timeText"] for row in rows], ["오후 3:10", "오후 2:58", "오후 2:26"])
+        nameless = rows[1]
+        self.assertIsNone(nameless["name"])
+        self.assertTrue(nameless["nameUnreadable"] and nameless["hasUnread"] and nameless["previewUnreadable"])
+        self.assertEqual(nameless["badgeBox"], (593, 164, 618, 189))
+
+    def test_a_time_of_a_row_cut_by_the_top_edge_is_not_a_room(self):
+        lines = [self.line("이전 페이지 방", 120, 2, 250, 16), self.line("오후 4:00", 550, 3, 618, 15)] + self.lines()
+        rows = operations._rows_from_ocr(lines, self.image(), 1.0)
+        self.assertNotIn("오후 4:00", [row["timeText"] for row in rows])
+
+    def test_a_second_pass_fills_the_name_in(self):
+        rows = operations._rows_from_ocr(self.lines(), self.image(), 1.0, positions=True)
+        again = operations._rows_from_ocr(self.lines() + [self.line("홍길동", 120, 140, 160, 154),
+                                                          self.line("넵", 120, 168, 140, 182)],
+                                          self.image(), 1.0, positions=True)
+        operations._fill_unread_names(rows, again, 1.0)
+        self.assertEqual((rows[1]["name"], rows[1]["preview"]), ("홍길동", "넵"))
+        self.assertNotIn("nameUnreadable", rows[1])
+        self.assertNotIn("previewUnreadable", rows[1])
+
+    def test_pages_merge_a_nameless_row_only_inside_their_overlap(self):
+        named = {"name": "홍길동", "timeText": "오후 2:26", "preview": "넵"}
+        other = {"name": "다른 방", "timeText": "오후 2:20"}
+        nameless = {"name": None, "nameUnreadable": True, "timeText": "오후 2:26", "preview": None}
+        merged = operations._merge_pages([[dict(named), dict(other)], [dict(nameless), {"name": "새 방",
+                                                                                       "timeText": "오후 2:10"}]])
+        self.assertEqual([row["name"] for row in merged], ["홍길동", "다른 방", "새 방"])  # repeat in the overlap
+        merged = operations._merge_pages([[dict(named), dict(other), {"name": "셋째", "timeText": "오후 2:21"}],
+                                          [dict(nameless)]])
+        self.assertEqual([row["name"] for row in merged], ["홍길동", "다른 방", "셋째", None])  # not in it
+
+
 class SmallScaleOcrTests(unittest.TestCase):
     def test_darken_turns_grey_text_black_and_keeps_white(self):
         _, _, data = operations.cap.darken((2, 1, bytes((150, 150, 150, 255, 255, 255, 255, 255))))
@@ -236,6 +294,15 @@ class RecentMessagesTests(unittest.TestCase):
                          ["사진 동아리 24기 수다방", "주말 등산 모임"])
         self.assertEqual([(row["name"], row["reason"]) for row in result["notRead"]],
                          [("사진 동아리 25기 수다방", "room_window_not_open")])
+
+    def test_a_nameless_room_is_reported_not_guessed(self):
+        listed = [{"name": None, "nameUnreadable": True, "timeText": label(2), "preview": None, "hasUnread": True}]
+        listed += self.listed
+        app = FakeApp(listed, ["주말 등산 모임"], self.messages)
+        with patch.object(operations, "_clear_selection"):
+            result = app.recent_messages(minutes=60, open_rooms=True)
+        self.assertEqual(result["notRead"][0]["reason"], "name_unreadable")
+        self.assertNotIn(None, app.opened)
 
     def test_selection_is_cleared_once_after_the_outermost_call(self):
         app = FakeApp(self.listed, ["주말 등산 모임"], self.messages)
