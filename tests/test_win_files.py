@@ -65,7 +65,7 @@ class ArgumentTests(Scratch):
         self.assertTrue(files._size_fits(48, "읽지 못한 글자"))
 
     def test_bubble_titles(self):
-        self.assertTrue(files._shows("kwin live-data.csv", "kwin_live-data.csv"))  # OCR drops the underscore
+        self.assertTrue(files._shows("가상 자료-1.csv", "가상_자료-1.csv"))  # OCR drops the underscore
         self.assertFalse(files._shows("보고서 1.pdf", "보고서 2.pdf"))
         self.assertFalse(files._shows("data.txt", "a.txt"))  # too short to take a line above for granted
         self.assertTrue(files._shows("가상 친구견적서.pdf", "견적서.pdf"))   # the sender's name read above the title

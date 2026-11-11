@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "kakaotalk-win"
 version = "0.3.0"
-description = "MCP server that lets AI agents read, search and reply in KakaoTalk PC on Windows, using only the official app"
+description = "MCP server that lets AI agents read, search, reply, exchange files and open rooms in KakaoTalk PC on Windows, using only the official app"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
