@@ -33,10 +33,11 @@ def _preview(text, limit=400):
     return text if len(text) <= limit else text[:limit] + f"\n… (총 {len(text)}자)"
 
 
-def ask_send(room, text, timeout=120, notes=()):
-    """Return True only if the human pressed Yes."""
+def ask_send(room, text, timeout=120, notes=(), what=None):
+    """Return True only if the human pressed Yes. `what` names something other than a message ("파일 2개")."""
     warning = "".join(f"\n⚠ {note}" for note in notes)
-    message = (f"아래 메시지를 카카오톡으로 보낼까요?\n\n받는 방: {room}\n글자 수: {len(text)}{warning}\n\n"
+    message = (f"아래 {what or '메시지'}를 카카오톡으로 보낼까요?\n\n받는 방: {room}\n"
+               f"{what or f'글자 수: {len(text)}'}{warning}\n\n"
                f"{_preview(text)}\n\n[예]를 누르면 즉시 전송됩니다. {timeout}초 안에 답하지 않으면 취소됩니다.")
     result = {}
 

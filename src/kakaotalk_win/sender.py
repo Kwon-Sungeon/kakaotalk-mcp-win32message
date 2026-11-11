@@ -18,15 +18,21 @@ Order of a send (every step must pass, or nothing is typed):
 7. confirmation by re-reading: a new message with the same text after the
    previous tail, and an empty composer.
 
+Files go the same way (``send_files``): steps 1-5 are shared, step 6 is the app's
+own file dialog and send box (files.py), and step 7 looks for the new "파일: name"
+or photo messages. A file still uploading is reported as such, not as a failure.
+
 Anything that cannot be confirmed is ``outcome_unknown`` and is never retried
 automatically. Message bodies are stored only as hashes.
 """
 
+import os
 import re
 import time
 from datetime import datetime
 
-from . import checks, confirm, parser, safety
+from . import checks, confirm, files, parser, safety
+from . import capture as cap
 from . import win32 as w
 
 SOURCE = "kakaotalk_pc_win32"
@@ -34,6 +40,7 @@ SETTLED = frozenset({"observed_in_window", "blocked"})
 MESSAGE_KINDS = ("text", "media", "deleted")
 URL = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
 TAIL = 32
+UPLOADING = re.compile(r"^\[(?P<sender>[^\r\n]+?)\] +(?P<body>.+)$", re.DOTALL)  # "[sender]  파일: a.zip": no time yet
 POLL_SECONDS = 0.25
 UNRESOLVED_WINDOW = 600  # seconds an unconfirmed send blocks the same text to the same room
 
@@ -129,26 +136,10 @@ class SendEngine:
             if gate:
                 return self._not_sent(operation_id, window_title, **gate)
 
-            state, chat, blocked = self.ops._find_chat(window_title)
-            if blocked:
-                return self._not_sent(operation_id, window_title, **blocked)
-            opened_now = chat is None
-            if opened_now:
-                opening = self.ops.open_room(window_title)
-                if opening["status"] != "ok":
-                    return self._not_sent(operation_id, window_title, **opening)
-                state, chat, blocked = self.ops._find_chat(window_title)
-                if blocked:
-                    return self._not_sent(operation_id, window_title, **blocked)
-                if chat is None:
-                    return self._not_sent(operation_id, window_title, "room_window_not_open")
-            if state.main and state.main.locked:
-                return self._not_sent(operation_id, window_title, "kakaotalk_locked")
-            checked = self._check_target(chat, state.pid, window_title, require_self)
-            if checked.get("blocked"):
-                return self._not_sent(operation_id, window_title, checked["blocked"], openedWindow=opened_now,
-                                      **checked.get("extra", {}))
-            messages = checked["messages"]
+            target, refused = self._target(operation_id, window_title, require_self)
+            if refused:
+                return refused
+            state, chat, messages, opened_now = target
 
             notes = []
             if URL.search(text):
@@ -168,32 +159,109 @@ class SendEngine:
                 _, items, _ = self.ops._read_items(chat, state.pid)
                 messages = messages_of(items)
 
-            me = safety.self_name()
-            record = dict(phase="dispatching", operationId=operation_id, windowTitle=window_title,
-                          fingerprint=bound_to, textHash=text_hash(text), requireSelf=require_self,
-                          cutHashes=[text_hash(part) for part in parser.shown_prefixes(plain(text))],
-                          selfName=safety.sha256_hex(me) if me else None, createdAt=time.time(),
-                          baselineCount=len(messages),
-                          baselineTail=[parser.fingerprint(item) for item in messages[-TAIL:]])
+            record = self._record(operation_id, window_title, bound_to, require_self, messages,
+                                  textHash=text_hash(text),
+                                  cutHashes=[text_hash(part) for part in parser.shown_prefixes(plain(text))])
             safety.save_json(path, record)
             safety.record_send(window_title, text, operation_id=operation_id)
-            try:
-                dispatch = self._dispatch(chat, text)
-            except Exception as error:  # the composer may or may not hold the text now
-                dispatch = {"entered": None, "errorType": type(error).__name__}
-            record["dispatch"] = dispatch
-            if dispatch.get("entered") is False:
-                record.update(phase="blocked", reason=dispatch.get("reason"))
-                safety.save_json(path, record)
-                return self._report(record, dispatchCalls=1, warnings=notes)
-            try:
-                report = self._confirm(path, record, wait, first=True)
-            except Exception as error:  # Enter was posted: whatever failed, the outcome is not known
-                record.update(phase="outcome_unknown", reason="check_failed")
-                report = self._report(record, errorType=type(error).__name__,
-                                      note="Do not send again. Check with send_result using the same operation_id.")
-            report.update(dispatchCalls=1, warnings=notes, openedWindow=opened_now)
+            report = self._deliver(path, record, wait, lambda: self._dispatch(chat, text))
+            report.update(warnings=notes, openedWindow=opened_now)
             return report
+
+    def send_files(self, window_title, paths, operation_id, wait_seconds=60, require_self=False):
+        """The same journaled procedure for 1-10 files, handed over in the app's own file dialog."""
+        checks.room(window_title)
+        checks.flag(require_self, "require_self")
+        wait = checks.seconds(wait_seconds, highest=300)
+        found = files.paths(paths)
+        names = [os.path.basename(item) for item in found]
+        text = "\x1f".join(["files", *found])  # what the operation is bound to; never typed
+        path = safety.journal_path(operation_id)
+        bound_to = binding(window_title, text, require_self)
+        with safety.process_lock("send", wait_seconds=2), safety.process_lock("ui", wait_seconds=10):
+            earlier = safety.load_json(path)
+            if earlier:
+                return self._repeat(path, earlier, bound_to, wait)
+            gate = safety.check_send_allowed(window_title, "", count=len(found)) \
+                or self._unresolved_twin(window_title, text)
+            if gate:
+                return self._not_sent(operation_id, window_title, **gate)
+            target, refused = self._target(operation_id, window_title, require_self, draft_allowed=True)
+            if refused:
+                return refused
+            state, chat, messages, opened_now = target
+            if safety.confirm_mode() == "dialog":
+                listed = "\n".join(f"{name} ({os.path.getsize(item):,} bytes)" for name, item in zip(names, found))
+                if not confirm.ask_send(window_title, listed, what=f"파일 {len(found)}개"):
+                    return self._not_sent(operation_id, window_title, "declined_by_user")
+                state, chat, blocked = self.ops._find_chat(window_title)
+                if blocked or not chat:
+                    return self._not_sent(operation_id, window_title, "room_window_changed")
+                _, items, _ = self.ops._read_items(chat, state.pid)
+                messages = messages_of(items)
+            record = self._record(operation_id, window_title, bound_to, require_self, messages,
+                                  fileHashes=[text_hash(name) for name in names],
+                                  mediaHashes=[text_hash(name) for name in names if files.shown_as_media(name)])
+            safety.save_json(path, record)
+            safety.record_send(window_title, text, operation_id=operation_id)
+            with cap.ocr_session():
+                report = self._deliver(path, record, wait, lambda: files.dispatch(chat, state.pid, found))
+            if report["dispatched"] and len(found) > 1:  # handed over: every file counts toward the limits
+                safety.record_send(window_title, text, operation_id=operation_id, count=len(found) - 1)
+            report.update(openedWindow=opened_now, files=names)
+            return report
+
+    def _target(self, operation_id, window_title, require_self, draft_allowed=False):
+        """((state, chat, loaded messages, opened now), None), or (None, the not-sent report)."""
+        state, chat, blocked = self.ops._find_chat(window_title)
+        if blocked:
+            return None, self._not_sent(operation_id, window_title, **blocked)
+        opened_now = chat is None
+        if opened_now:
+            opening = self.ops.open_room(window_title)
+            if opening["status"] != "ok":
+                return None, self._not_sent(operation_id, window_title, **opening)
+            state, chat, blocked = self.ops._find_chat(window_title)
+            if blocked:
+                return None, self._not_sent(operation_id, window_title, **blocked)
+            if chat is None:
+                return None, self._not_sent(operation_id, window_title, "room_window_not_open")
+        if state.main and state.main.locked:
+            return None, self._not_sent(operation_id, window_title, "kakaotalk_locked")
+        checked = self._check_target(chat, state.pid, window_title, require_self, draft_allowed)
+        if checked.get("blocked"):
+            return None, self._not_sent(operation_id, window_title, checked["blocked"], openedWindow=opened_now,
+                                        **checked.get("extra", {}))
+        return (state, chat, checked["messages"], opened_now), None
+
+    @staticmethod
+    def _record(operation_id, window_title, bound_to, require_self, messages, **what):
+        me = safety.self_name()
+        return dict(phase="dispatching", operationId=operation_id, windowTitle=window_title,
+                    fingerprint=bound_to, requireSelf=require_self,
+                    selfName=safety.sha256_hex(me) if me else None, createdAt=time.time(),
+                    baselineCount=len(messages),
+                    baselineTail=[parser.fingerprint(item) for item in messages[-TAIL:]], **what)
+
+    def _deliver(self, path, record, wait, dispatch):
+        """Run the one dispatch and confirm it. The intent is on disk already."""
+        try:
+            done = dispatch()
+        except Exception as error:  # the app may or may not have taken it
+            done = {"entered": None, "errorType": type(error).__name__}
+        record["dispatch"] = done
+        if done.get("entered") is False:
+            record.update(phase="blocked", reason=done.get("reason"))
+            safety.save_json(path, record)
+            return self._report(record, dispatchCalls=1)
+        try:
+            report = self._confirm(path, record, wait, first=True)
+        except Exception as error:  # it was handed over: whatever failed, the outcome is not known
+            record.update(phase="outcome_unknown", reason="check_failed")
+            report = self._report(record, errorType=type(error).__name__,
+                                  note="Do not send again. Check with send_result using the same operation_id.")
+        report["dispatchCalls"] = 1
+        return report
 
     @staticmethod
     def _unresolved_twin(window_title, text):
@@ -218,9 +286,9 @@ class SendEngine:
         report.update(deduplicated=True, dispatchCalls=0)
         return report
 
-    def _check_target(self, chat, pid, window_title, require_self):
+    def _check_target(self, chat, pid, window_title, require_self, draft_allowed=False):
         try:
-            if chat.draft():
+            if chat.draft() and not draft_allowed:  # a file send does not touch the composer's text
                 return {"blocked": "existing_draft_preserved"}
         except TimeoutError:
             return {"blocked": "composer_unresponsive"}
@@ -279,15 +347,18 @@ class SendEngine:
             draft = chat.draft()
         except TimeoutError:
             return {"observed": False, "reason": "composer_unresponsive"}
-        if draft and text_hash(draft) == record["textHash"]:
+        sent_files = record.get("fileHashes")
+        if draft and not sent_files and text_hash(draft) == record["textHash"]:
             return {"observed": False, "reason": "text_still_in_composer", "textInComposer": True, "chat": chat}
         _, items, _ = self.ops._read_items(chat, state.pid)
         messages = messages_of(items)
         fresh, aligned = new_after_tail(messages, record.get("baselineTail") or [])
         if not aligned:
-            # The loaded range changed. Accept only the newest message, and only if it is
-            # shown in the minute of the dispatch or later.
-            fresh = messages[-1:]
+            # The loaded range changed. Accept only the newest message (one per file), and only
+            # if it is shown in the minute of the dispatch or later.
+            fresh = messages[-len(sent_files or "1"):]
+        if sent_files:
+            return self._look_for_files(record, items, fresh, aligned)
         for item in reversed(fresh or []):
             if not shows_sent_text(item, record):  # any kind: a text "사진" parses as a photo
                 continue
@@ -305,8 +376,39 @@ class SendEngine:
             return {"observed": True, "authorVerified": author, "baselineAligned": aligned}
         return {"observed": False, "reason": "new_message_not_observed", "baselineAligned": aligned}
 
+    @staticmethod
+    def _look_for_files(record, items, fresh, aligned):
+        """Every file must show as its own "파일: name" message; pictures and videos may instead
+        be among the new photo/video messages."""
+        def mine(sender):
+            return not record.get("selfName") or safety.sha256_hex(sender or "") == record["selfName"]
+
+        waiting, pictures = list(record["fileHashes"]), 0
+        for item in fresh or []:
+            if item.get("kind") != "media" or not mine(item.get("sender")):
+                continue
+            shown = _local_minutes(item)
+            if not aligned and (shown is None or shown < record["createdAt"] // 60 * 60):
+                continue
+            name = files.name_of(item.get("text"))
+            if name and text_hash(name) in waiting:
+                waiting.remove(text_hash(name))
+            elif item.get("mediaType") in ("photo", "video"):
+                count = re.search(r"\d+", item.get("text") or "")
+                pictures += int(count.group()) if count else 1
+        if len(waiting) <= pictures and all(name in record.get("mediaHashes", ()) for name in waiting):
+            return {"observed": True, "authorVerified": True if record.get("selfName") else None,
+                    "baselineAligned": aligned}
+        # While a file uploads, the app lists the message without a time: "[sender] 파일: name".
+        for item in items[-len(record["fileHashes"]) - 5:]:
+            pending = UPLOADING.match(item.get("text") or "") if item.get("kind") == "unclassified" else None
+            if pending and mine(pending["sender"]) and parser.classify_body(pending["body"])[0] == "media":
+                return {"observed": False, "reason": "upload_in_progress", "baselineAligned": aligned}
+        return {"observed": False, "reason": "new_message_not_observed", "baselineAligned": aligned}
+
     def _settle_observed(self, path, record, observed):
-        record.update(phase="observed_in_window", reason="new_message_and_empty_composer",
+        record.update(phase="observed_in_window",
+                      reason="new_file_messages" if record.get("fileHashes") else "new_message_and_empty_composer",
                       authorVerified=observed.get("authorVerified"))
         safety.save_json(path, record)
         safety.note_confirmed_send()
@@ -340,6 +442,9 @@ class SendEngine:
                 return self._report(record, safetyStop=safety.note_unconfirmed_send())
         record.update(phase="outcome_unknown", reason=observed.get("reason", "not_observed"))
         safety.save_json(path, record)
+        if record["reason"] == "upload_in_progress":  # the app is still working on it: not a failed send
+            return self._report(record, note="The files are still uploading. Do not send again; "
+                                             "check later with send_result using the same operation_id.")
         return self._report(record, safetyStop=safety.note_unconfirmed_send() if first else None,
                             note="Do not send again. Check with send_result using the same operation_id.")
 
@@ -347,7 +452,7 @@ class SendEngine:
 
     def recheck(self, operation_id, wait_seconds=0):
         """Report a journaled send; an unsettled one is re-checked by reading only."""
-        wait = checks.seconds(wait_seconds)
+        wait = checks.seconds(wait_seconds, highest=300)  # an upload can take minutes
         path = safety.journal_path(operation_id)
         with safety.process_lock("send", wait_seconds=2), safety.process_lock("ui", wait_seconds=10):
             record = safety.load_json(path)

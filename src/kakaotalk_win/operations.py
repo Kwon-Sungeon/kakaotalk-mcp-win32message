@@ -12,6 +12,8 @@
     load_more       -> WM_VSCROLL SB_PAGEUP (WM_MOUSEWHEEL fallback) on the list, view restored
     search_messages -> local search over the loaded messages
     send_message    -> composer EM_REPLACESEL + Enter, confirmed by re-reading (sender.py)
+    send_files      -> composer Ctrl+T, the Windows file dialog, the app's "파일 전송" box (files.py)
+    save_file       -> the file bubble's "저장" link, picked up in the app's download folder
     send_result     -> journal lookup + read-only re-check
     create_room     -> Ctrl+N "대화상대 선택" dialog: names searched, ticked and confirmed (people.py)
     invite          -> chat window menu "초대", then the same dialog
@@ -768,6 +770,18 @@ class KakaoTalkWin:
     def send_message(self, window_title, text, operation_id, wait_seconds=8, require_self=False):
         """One journaled send into an existing room (see sender.py for the full procedure)."""
         return self._sender().send(window_title, text, operation_id, wait_seconds, require_self)
+
+    @_clears_selection
+    def send_files(self, window_title, paths, operation_id, wait_seconds=60, require_self=False):
+        """One journaled send of 1-10 files into an existing room (see sender.py and files.py)."""
+        return self._sender().send_files(window_title, paths, operation_id, wait_seconds, require_self)
+
+    @_one_ocr_process
+    @_clears_selection
+    def save_file(self, window_title, file_name, output_dir="", wait_seconds=60, scroll_pages=10):
+        """Save a received file through its bubble's "저장" link (see files.py)."""
+        from . import files
+        return files.save(self, window_title, file_name, output_dir, wait_seconds, scroll_pages)
 
     # ------------------------------------------------------------------ new rooms and invitations
 

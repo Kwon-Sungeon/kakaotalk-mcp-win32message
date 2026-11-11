@@ -189,8 +189,8 @@ def _recent_sends(now):
     return [entry for entry in entries if isinstance(entry, dict) and entry.get("at", 0) >= horizon]
 
 
-def check_send_allowed(room, text, now=None):
-    """Return None when a send may proceed, else a blocked-result dict."""
+def check_send_allowed(room, text, now=None, count=1):
+    """Return None when `count` sends (one message, or that many files) may proceed, else a blocked-result dict."""
     now = time.time() if now is None else now
     effective = limits()
     breaker = breaker_state()
@@ -207,11 +207,11 @@ def check_send_allowed(room, text, now=None):
             return {"status": "blocked", "reason": "send_interval", "retryAfterSeconds": round(wait, 1)}
     hour = [entry for entry in sends if entry["at"] >= now - 3600]
     day = [entry for entry in sends if entry["at"] >= now - 86400]
-    if len(hour) >= effective["per_hour"]:
+    if len(hour) + count > effective["per_hour"]:
         return {"status": "blocked", "reason": "hourly_send_limit", "limit": effective["per_hour"]}
-    if len(day) >= effective["per_day"]:
+    if len(day) + count > effective["per_day"]:
         return {"status": "blocked", "reason": "daily_send_limit", "limit": effective["per_day"]}
-    if sum(entry["room"] == room_key for entry in hour) >= effective["per_room_per_hour"]:
+    if sum(entry["room"] == room_key for entry in hour) + count > effective["per_room_per_hour"]:
         return {"status": "blocked", "reason": "room_hourly_send_limit", "limit": effective["per_room_per_hour"]}
     rooms_this_hour = {entry["room"] for entry in hour}
     if room_key not in rooms_this_hour and len(rooms_this_hour) >= effective["distinct_rooms_per_hour"]:
@@ -220,11 +220,11 @@ def check_send_allowed(room, text, now=None):
     return None
 
 
-def record_send(room, text, now=None, operation_id=None):
+def record_send(room, text, now=None, operation_id=None, count=1):
     now = time.time() if now is None else now
     sends = _recent_sends(now)
-    sends.append({"at": now, "room": short_hash(room), "text": short_hash(normalize_text(text)),
-                  "op": operation_id})
+    sends.extend([{"at": now, "room": short_hash(room), "text": short_hash(normalize_text(text)),
+                   "op": operation_id}] * count)
     save_json(_send_log_path(), sends)
 
 

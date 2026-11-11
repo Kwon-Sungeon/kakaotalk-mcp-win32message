@@ -7,7 +7,7 @@ from pathlib import Path
 
 METHODS = ("status", "windows", "rooms", "search_rooms", "open_room", "close_room", "read_messages",
            "read_many", "load_more", "search_messages", "read_full_text", "recent_messages", "capture",
-           "send_message", "send_result", "create_room", "invite")
+           "send_message", "send_files", "save_file", "send_result", "create_room", "invite")
 SUCCESS = frozenset({"ok", "partial", "observed_in_window"})
 
 
@@ -35,6 +35,8 @@ def _config(args):
                 "클라이언트에서 전송 도구를 '항상 허용'하면 사람의 확인 없이 전송됩니다.", "OFF"):
             return {"status": "cancelled"}
         changes["confirmSend"] = args.confirm
+    if args.download_folder is not None:
+        changes["downloadFolder"] = args.download_folder.strip() or None
     if args.limit:
         limits = dict(safety.load_config().get("limits", {}) or {})
         for item in args.limit:
@@ -91,6 +93,8 @@ def _parser():
     settings.add_argument("--self-name", help="Your KakaoTalk profile name (enables author checks, require_self)")
     settings.add_argument("--confirm", choices=("off", "dialog"),
                           help="Extra Yes/No dialog before each send (default: off)")
+    settings.add_argument("--download-folder", metavar="FOLDER",
+                          help="Where KakaoTalk saves received files, if not Documents\\카카오톡 받은 파일")
     settings.add_argument("--limit", action="append", metavar="KEY=VALUE", help="Make a send limit stricter")
     sub.add_parser("reset-stop", help="Clear a safety stop after checking KakaoTalk (interactive)")
     sub.add_parser("mcp-config", help="Print MCP client configuration for this installation")
@@ -133,7 +137,7 @@ def main(argv=None):
             result = local[args.command]()
         else:
             from .operations import KakaoTalkWin
-            if args.command == "call" and args.method == "send_message" and args.args_file:
+            if args.command == "call" and args.method in ("send_message", "send_files") and args.args_file:
                 pending_operation = _peek_operation(args.args_file)
             result = _call(KakaoTalkWin(), args)
     except Exception as error:

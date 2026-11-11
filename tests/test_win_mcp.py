@@ -17,7 +17,8 @@ EXPECTED = {"kakaotalk_win_status", "kakaotalk_win_windows", "kakaotalk_win_room
             "kakaotalk_win_open", "kakaotalk_win_close", "kakaotalk_win_read", "kakaotalk_win_read_attachment",
             "kakaotalk_win_read_many", "kakaotalk_win_load_more", "kakaotalk_win_search", "kakaotalk_win_send",
             "kakaotalk_win_send_result", "kakaotalk_win_read_full_text", "kakaotalk_win_recent",
-            "kakaotalk_win_create_room", "kakaotalk_win_invite"}
+            "kakaotalk_win_create_room", "kakaotalk_win_invite",
+            "kakaotalk_win_send_file", "kakaotalk_win_save_file"}
 
 
 class ServerTests(unittest.IsolatedAsyncioTestCase):
