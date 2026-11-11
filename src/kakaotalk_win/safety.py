@@ -9,8 +9,6 @@ independently of whatever the AI agent decides:
 
 * conservative send pacing (interval, per-hour, per-day, per-room caps) that
   can only be lowered by configuration, never raised;
-* no broadcasting: the same text cannot go to another room within 24 hours;
-* sends only into rooms that already have conversation history (never a new room);
 * a circuit breaker that stops all sending after an app notice (e.g. a
   protection/restriction dialog) or repeated unconfirmed sends, until the user
   resets it;
@@ -25,7 +23,6 @@ import hashlib
 import json
 import msvcrt
 import os
-import re
 import threading
 import time
 from pathlib import Path
@@ -42,13 +39,9 @@ CEILINGS = {
     "per_day": 100,
     "per_room_per_hour": 10,
     "distinct_rooms_per_hour": 10,
-    "duplicate_window_hours": 24.0,  # same text to a different room is blocked within this window
     "opens_per_minute": 6,
     "max_text_chars": 5000,
 }
-
-SHORT_REPLY_CHARS = 30
-LINK = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
 
 _thread_lock = threading.RLock()
 
@@ -92,7 +85,10 @@ def load_json(path, default=None):
         content = Path(path).read_text(encoding="utf-8")
     except FileNotFoundError:
         return default
-    return json.loads(content)
+    try:
+        return json.loads(content)
+    except ValueError:
+        raise ValueError(f"State file is damaged, fix or delete it: {path}") from None
 
 
 _held = threading.local()
@@ -160,7 +156,7 @@ def limits():
         value = configured.get(key)
         if not isinstance(value, (int, float)) or isinstance(value, bool):
             continue
-        if key == "min_interval_seconds" or key == "duplicate_window_hours":
+        if key == "min_interval_seconds":
             effective[key] = max(ceiling, float(value))
         else:
             effective[key] = max(0, min(ceiling, int(value)))
@@ -173,8 +169,8 @@ def confirm_mode():
     'dialog': a native Yes/No box the human must answer before each send. An
     unrecognized value fails closed to 'dialog'.
     """
-    value = os.environ.get("KAKAOTALK_WIN_CONFIRM") or load_config().get("confirmSend") or "off"
-    return value if value in ("off", "dialog") else "dialog"
+    values = {os.environ.get("KAKAOTALK_WIN_CONFIRM") or "off", load_config().get("confirmSend") or "off"}
+    return "off" if values == {"off"} else "dialog"  # the stricter of the two settings wins
 
 
 def self_name():
@@ -204,7 +200,7 @@ def check_send_allowed(room, text, now=None):
     if len(text) > effective["max_text_chars"]:
         return {"status": "blocked", "reason": "text_too_long", "maxChars": effective["max_text_chars"]}
     sends = _recent_sends(now)
-    room_key, text_key = short_hash(room), short_hash(normalize_text(text))
+    room_key = short_hash(room)
     if sends:
         wait = sends[-1]["at"] + effective["min_interval_seconds"] - now
         if wait > 0:
@@ -221,22 +217,24 @@ def check_send_allowed(room, text, now=None):
     if room_key not in rooms_this_hour and len(rooms_this_hour) >= effective["distinct_rooms_per_hour"]:
         return {"status": "blocked", "reason": "too_many_rooms_per_hour",
                 "limit": effective["distinct_rooms_per_hour"]}
-    window = now - effective["duplicate_window_hours"] * 3600
-    normalized = normalize_text(text)
-    # Short everyday replies ("네 감사합니다") may go to several people; long or linked texts may not.
-    broadcastable = len(normalized) > SHORT_REPLY_CHARS or LINK.search(normalized)
-    if broadcastable and any(entry["text"] == text_key and entry["room"] != room_key and entry["at"] >= window
-                             for entry in sends):
-        return {"status": "blocked", "reason": "same_text_sent_to_another_room",
-                "detail": "Broadcasting identical text to several rooms is not supported."}
     return None
 
 
-def record_send(room, text, now=None):
+def record_send(room, text, now=None, operation_id=None):
     now = time.time() if now is None else now
     sends = _recent_sends(now)
-    sends.append({"at": now, "room": short_hash(room), "text": short_hash(normalize_text(text))})
+    sends.append({"at": now, "room": short_hash(room), "text": short_hash(normalize_text(text)),
+                  "op": operation_id})
     save_json(_send_log_path(), sends)
+
+
+def recent_operations(room, text, seconds, now=None):
+    """operation_ids of sends of this text to this room within the last `seconds`, newest first."""
+    now = time.time() if now is None else now
+    room_key, text_key = short_hash(room), short_hash(normalize_text(text))
+    return [entry["op"] for entry in reversed(_recent_sends(now))
+            if entry.get("op") and entry["at"] >= now - seconds
+            and entry["room"] == room_key and entry["text"] == text_key]
 
 
 def _open_log_path():

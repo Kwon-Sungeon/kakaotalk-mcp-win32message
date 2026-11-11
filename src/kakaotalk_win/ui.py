@@ -54,7 +54,11 @@ def placeholders():
 
 
 class KakaoNotRunning(RuntimeError):
-    pass
+    reason = "kakaotalk_not_running"
+
+
+class SeveralKakaoProcesses(KakaoNotRunning):
+    reason = "multiple_kakaotalk_processes"
 
 
 @dataclass
@@ -68,9 +72,6 @@ class ChatWindow:
     @property
     def minimized(self):
         return bool(w.user32.IsIconic(self.hwnd))
-
-    def alive(self):
-        return bool(w.user32.IsWindow(self.hwnd)) and w.window_text(self.hwnd) == self.title
 
     def draft(self):
         """Composer text, or "" when only the placeholder is shown."""
@@ -141,7 +142,7 @@ def snapshot():
     if not processes:
         raise KakaoNotRunning("KakaoTalk PC is not running")
     if len(processes) > 1:
-        raise KakaoNotRunning("More than one KakaoTalk process is running")
+        raise SeveralKakaoProcesses("More than one KakaoTalk process is running")
     pid, image = next(iter(processes.items()))
     state = Snapshot(pid=pid, image=image)
     for hwnd in w.top_windows():

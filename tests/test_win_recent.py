@@ -223,13 +223,13 @@ class FakeApp(KakaoTalkWin):
     def _state(self):
         return SimpleNamespace(chats=[SimpleNamespace(title=title) for title in self.open_titles])
 
-    def open_room(self, window_title, require_existing=True):
+    def open_room(self, window_title, accept_similar=False):
         self.opened.append(window_title)
-        if window_title == "AB 프로젝트":
-            return {"status": "blocked", "reason": "search_top_result_mismatch", "openedTitle": "AB 프로젝트방"}
+        if window_title == "AB 프로젝트" and accept_similar:  # the search shows the full name; it is taken
+            window_title = "AB 프로젝트방"
         if window_title in self.messages:
             self.open_titles.append(window_title)
-            return {"status": "ok"}
+            return {"status": "ok", "windowTitle": window_title}
         return {"status": "blocked", "reason": "room_not_found"}
 
     def close_room(self, window_title):
@@ -281,6 +281,43 @@ class RecentMessagesTests(unittest.TestCase):
         self.assertEqual(result["markedAsRead"], ["AB 프로젝트방"])
         self.assertEqual(app.closed, ["AB 프로젝트방"])
         self.assertEqual(result["notRead"], [])
+
+    def test_a_pinned_old_room_above_recent_ones_is_not_a_candidate(self):
+        listed = [{"name": "고정된 옛 방", "timeText": "어제", "preview": "지난 얘기", "hasUnread": False}] + self.listed
+        app = FakeApp(listed, ["주말 등산 모임"], self.messages)
+        with patch.object(operations, "_clear_selection"):
+            result = app.recent_messages(minutes=60, open_rooms=True)
+        self.assertNotIn("고정된 옛 방", app.opened)
+        self.assertNotIn("고정된 옛 방", [row["name"] for row in result["notRead"]])
+
+    def test_named_open_windows_are_read_without_the_room_list(self):
+        app = FakeApp(self.listed, ["주말 등산 모임"], self.messages)
+        app.rooms = None  # must not be called
+        with patch.object(operations, "_clear_selection"):
+            result = app.recent_messages(minutes=60, window_titles=["주말 등산 모임"])
+        self.assertEqual([m["text"] for m in result["rooms"][0]["messages"]], ["토요일 7시 출발"])
+
+    def test_messages_without_a_time_make_the_room_possibly_incomplete(self):
+        messages = {"주말 등산 모임": [dict(message("언제인지 모름", 5), date=None)]}
+        app = FakeApp(self.listed, ["주말 등산 모임"], messages)
+        with patch.object(operations, "_clear_selection"):
+            room = app.recent_messages(minutes=60, window_titles=["주말 등산 모임"])["rooms"][0]
+        self.assertEqual((room["total"], room["undatedMessages"], room["mayBeIncomplete"]), (0, 1, True))
+
+    def test_search_result_row_for_a_title(self):
+        rows = [{"name": "가상 모임 1", "nameVariants": []},
+                {"name": "가상 독서 모임 열두번째 이야기 나누는", "nameVariants": []},  # cut short by the list
+                {"name": None, "nameUnreadable": True},
+                {"name": "가상 모임", "memberCount": 10, "nameVariants": ["가상 모임 10"]}]
+        self.assertEqual(operations._result_row(rows, "가상 모임 10"), 3)
+        self.assertEqual(operations._result_row(rows, "가상 모임 1"), 0)
+        self.assertEqual(operations._result_row(rows, "가상 독서 모임 열두번째 이야기 나누는 방"), 1)
+        self.assertEqual(operations._result_row(rows, "전혀 다른 방"), 2)  # only the unreadable row could be it
+        self.assertIsNone(operations._result_row(rows[:2], "전혀 다른 방"))
+
+    def test_names_that_differ_by_a_number_are_different_rooms(self):
+        self.assertFalse(operations._similar("가상 모임 1", "가상 모임 10"))
+        self.assertTrue(operations._similar("가상 모임 열번째 이야", "가상 모임 열번째 이야기방"))
 
     def test_a_closed_room_is_never_read_from_a_look_alike_open_room(self):
         listed = [{"name": "사진 동아리 25기 수다방", "timeText": label(3), "preview": "사진 올려요", "hasUnread": True},

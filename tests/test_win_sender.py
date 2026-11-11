@@ -82,7 +82,7 @@ class FakeOps:
         found = state.chats_titled(title)
         return state, (found[0] if found else None), None
 
-    def open_room(self, title, require_existing=True):
+    def open_room(self, title):
         self.opens.append(title)
         if title not in self.world.rooms:
             return {"status": "blocked", "reason": "room_not_found"}
@@ -161,13 +161,63 @@ class SenderTests(unittest.TestCase):
         self.assertEqual(self.ops.opens, ["둘"])
         self.assertTrue(result["openedWindow"])
 
-    def test_unknown_room_and_room_without_history_are_never_typed_into(self):
-        self.assertEqual(self.send(room="없는방")["reason"], "room_not_found")
-        result = self.send(room="빈방", op="op-2")
-        self.assertReason(result, "room_without_history")
+    def test_unknown_room_is_never_typed_into(self):
+        result = self.send(room="없는방")
+        self.assertReason(result, "room_not_found")
         self.assertFalse(result["dispatched"])
         self.assertEqual(self.world.typed, [])
-        self.assertEqual(self.answers, [])
+
+    def test_first_message_into_a_new_empty_room(self):
+        self.assertStatus(self.send(room="빈방"), "observed_in_window")
+
+    def test_same_text_to_another_room_is_allowed(self):
+        notice = "이번 주 금요일 오후 세 시에 전체 회의가 있습니다. 자료를 미리 확인해 주세요."
+        self.assertStatus(self.send(text=notice, op="a"), "observed_in_window")
+        self.allow_next_send()
+        self.assertStatus(self.send(room="둘", text=notice, op="b"), "observed_in_window")
+
+    def test_unresolved_send_blocks_the_same_text_under_a_new_id(self):
+        self.world.enter = "slow"
+        self.assertStatus(self.send(op="first"), "outcome_unknown")
+        log = safety.load_json(safety.STATE_ROOT / "send-log.json")
+        log[-1]["at"] -= 60  # past the send interval, inside the unresolved window
+        safety.save_json(safety.STATE_ROOT / "send-log.json", log)
+        again = self.send(op="second")
+        self.assertReason(again, "previous_send_unresolved")
+        self.assertEqual(again["previousOperationId"], "first")
+        self.assertEqual(self.world.enters, 1)
+        self.assertStatus(self.send(op="third", text="다른 글"), "outcome_unknown")  # other text is not held back
+
+    def test_text_the_user_typed_meanwhile_is_never_cleared(self):
+        def typing_human(hwnd, text):
+            self.world.composer[hwnd] = text + "사람이 덧붙인 글"
+        with patch.object(w, "replace_all_text", typing_human):
+            result = self.send()
+        self.assertReason(result, "composer_text_mismatch")
+        self.assertIn("사람이 덧붙인 글", self.world.composer["친구"])
+        self.assertEqual(self.world.enters, 0)
+
+    def test_unreadable_room_after_cleanup_stays_unknown(self):
+        self.world.enter = "ignored"
+        reads = iter([None])  # the baseline read succeeds; after the clean-up reading fails
+
+        def flaky(chat, pid):
+            if next(reads, "fail") == "fail" and not self.world.composer.get(chat.title):
+                raise RuntimeError("copy failed")
+            return "raw", [dict(item) for item in self.world.rooms[chat.title]], {}
+        with patch.object(self.ops, "_read_items", flaky):
+            result = self.send()
+        self.assertStatus(result, "outcome_unknown")
+
+    def test_text_equal_to_a_media_label_is_confirmed(self):
+        self.world.post_plain_key_original = self.world.post_plain_key
+
+        def deliver_as_media(hwnd, vk):
+            self.world.enters += 1
+            self.world.rooms[hwnd].append(dict(message("나", "사진"), kind="media", mediaType="photo"))
+            self.world.composer[hwnd] = ""
+        with patch.object(w, "post_plain_key", deliver_as_media):
+            self.assertStatus(self.send(text="사진"), "observed_in_window")
 
     def test_dialog_mode_asks_once_before_typing(self):
         self.dialog_mode()

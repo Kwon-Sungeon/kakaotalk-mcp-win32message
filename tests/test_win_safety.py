@@ -28,12 +28,11 @@ class StateTestCase(unittest.TestCase):
 class LimitTests(StateTestCase):
     def test_configuration_can_only_tighten(self):
         safety.save_config({"limits": {"per_hour": 500, "per_day": 5, "min_interval_seconds": 1,
-                                       "duplicate_window_hours": 48, "opens_per_minute": True}})
+                                       "opens_per_minute": True}})
         limits = safety.limits()
         self.assertEqual(limits["per_hour"], 20)
         self.assertEqual(limits["per_day"], 5)
         self.assertEqual(limits["min_interval_seconds"], 10.0)
-        self.assertEqual(limits["duplicate_window_hours"], 48.0)
         self.assertEqual(limits["opens_per_minute"], safety.CEILINGS["opens_per_minute"])
 
     def test_confirm_defaults_to_off_and_unknown_values_fail_closed(self):
@@ -42,6 +41,19 @@ class LimitTests(StateTestCase):
         self.assertEqual(safety.confirm_mode(), "dialog")
         safety.save_config({"confirmSend": "nonsense"})
         self.assertEqual(safety.confirm_mode(), "dialog")
+
+    def test_environment_cannot_switch_a_configured_dialog_off(self):
+        safety.save_config({"confirmSend": "dialog"})
+        with patch.dict("os.environ", {"KAKAOTALK_WIN_CONFIRM": "off"}):
+            self.assertEqual(safety.confirm_mode(), "dialog")
+        safety.save_config({"confirmSend": "off"})
+        with patch.dict("os.environ", {"KAKAOTALK_WIN_CONFIRM": "dialog"}):
+            self.assertEqual(safety.confirm_mode(), "dialog")
+
+    def test_damaged_state_file_is_an_error_not_an_empty_log(self):
+        (safety.STATE_ROOT / "send-log.json").write_text("{not json", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            safety.check_send_allowed("방", "안녕", 1.0)
 
 
 class GateTests(StateTestCase):
@@ -73,19 +85,14 @@ class GateTests(StateTestCase):
             safety.record_send(f"r{index % 5}", f"d{index}", now - 80000 + 700 * index)
         self.assertEqual(safety.check_send_allowed("r1", "x", now + 100)["reason"], "daily_send_limit")
 
-    def test_no_broadcast_of_long_or_linked_text(self):
+    def test_same_text_may_go_to_several_rooms(self):
         now = 4_000_000.0
-        long_text = "이번 주 금요일 오후 세 시에 전체 회의가 있습니다. 자료를 미리 확인해 주세요."
-        safety.record_send("A", long_text, now)
-        blocked = safety.check_send_allowed("B", "  " + long_text.replace(" ", "  "), now + 60)
-        self.assertEqual(blocked["reason"], "same_text_sent_to_another_room")
-        self.assertIsNone(safety.check_send_allowed("A", long_text, now + 60))
-        self.assertIsNone(safety.check_send_allowed("B", long_text, now + 86400 + 60))
-        safety.record_send("A", "네 감사합니다", now + 100)
-        self.assertIsNone(safety.check_send_allowed("B", "네 감사합니다", now + 200))
-        safety.record_send("A", "https://ex.am/p", now + 300)
-        self.assertEqual(safety.check_send_allowed("B", "https://ex.am/p", now + 400)["reason"],
-                         "same_text_sent_to_another_room")
+        notice = "이번 주 금요일 오후 세 시에 전체 회의가 있습니다. 자료를 미리 확인해 주세요."
+        safety.record_send("A", notice, now, operation_id="op-a")
+        self.assertIsNone(safety.check_send_allowed("B", notice, now + 60))
+        self.assertEqual(safety.recent_operations("A", "  " + notice, 600, now + 60), ["op-a"])
+        self.assertEqual(safety.recent_operations("B", notice, 600, now + 60), [])
+        self.assertEqual(safety.recent_operations("A", notice, 600, now + 700), [])
 
     def test_breaker_and_text_length(self):
         self.assertEqual(safety.check_send_allowed("A", "x" * 5001, 1.0)["reason"], "text_too_long")

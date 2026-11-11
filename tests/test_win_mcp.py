@@ -16,7 +16,8 @@ from kakaotalk_win.operations import _has_red_badge, _match_shortened, _merge_pa
 EXPECTED = {"kakaotalk_win_status", "kakaotalk_win_windows", "kakaotalk_win_rooms", "kakaotalk_win_search_rooms",
             "kakaotalk_win_open", "kakaotalk_win_close", "kakaotalk_win_read", "kakaotalk_win_read_attachment",
             "kakaotalk_win_read_many", "kakaotalk_win_load_more", "kakaotalk_win_search", "kakaotalk_win_send",
-            "kakaotalk_win_send_result", "kakaotalk_win_read_full_text", "kakaotalk_win_recent"}
+            "kakaotalk_win_send_result", "kakaotalk_win_read_full_text", "kakaotalk_win_recent",
+            "kakaotalk_win_create_room", "kakaotalk_win_invite"}
 
 
 class ServerTests(unittest.IsolatedAsyncioTestCase):
@@ -30,15 +31,34 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("operation_id", send.inputSchema["required"])
         self.assertFalse(send.annotations.idempotentHint)
         self.assertTrue(send.annotations.openWorldHint)
-        for name in tools:
+        for name, tool in tools.items():
             self.assertNotIn("reset", name)
             self.assertNotIn("config", name)
+            self.assertIsNone(tool.outputSchema, name)  # replies are sent once, as text
+        self.assertFalse(tools["kakaotalk_win_read_many"].inputSchema["properties"]["open_if_needed"]["default"])
+
+    async def test_a_missing_app_is_a_blocked_reply_not_an_error(self):
+        from kakaotalk_win import ui
+        with patch("kakaotalk_win.operations.KakaoTalkWin") as ops:
+            ops.return_value.windows.side_effect = ui.SeveralKakaoProcesses("two")
+            self.assertEqual(json.loads(mcp_server.kakaotalk_win_windows())["reason"], "multiple_kakaotalk_processes")
+            ops.return_value.windows.side_effect = ui.KakaoNotRunning("none")
+            self.assertEqual(json.loads(mcp_server.kakaotalk_win_windows())["reason"], "kakaotalk_not_running")
+
+    async def test_a_capture_is_deleted_even_when_attaching_it_fails(self):
+        shot = capture.save_png((4, 4, b"\xff" * 64))
+        with patch("kakaotalk_win.operations.KakaoTalkWin") as ops, patch.object(mcp_server, "Image") as image:
+            image.return_value.to_image_content.side_effect = RuntimeError("cannot encode")
+            ops.return_value.capture.return_value = {"status": "ok", "imagePath": shot}
+            with self.assertRaises(RuntimeError):
+                mcp_server.kakaotalk_win_read_attachment("방")
+        self.assertFalse(os.path.exists(shot))
 
     async def test_tools_delegate_to_operations(self):
         with patch("kakaotalk_win.operations.KakaoTalkWin") as ops:
             ops.return_value.read_messages.return_value = {"status": "ok", "items": []}
             self.assertEqual(json.loads(mcp_server.kakaotalk_win_read("방", 3))["status"], "ok")
-            ops.return_value.read_messages.assert_called_once_with("방", 3, 0, "")
+            ops.return_value.read_messages.assert_called_once_with("방", 3, 0, "", since="")
             ops.return_value.send_message.return_value = {"status": "blocked"}
             mcp_server.kakaotalk_win_send("방", "안녕", "op-1")
             ops.return_value.send_message.assert_called_once_with("방", "안녕", "op-1", 8, False)
@@ -153,7 +173,7 @@ class OcrRowTests(unittest.TestCase):
                           ("OAB 프로젝트방", 4, "네 확인했습니다", "오후 1:56", "2"),
                           ("김철수", None, "자료 정리해서 내일 오전에 공유 드릴게요.", "오후 1:03", None),
                           ("이영희", None, "그렇구나......", "어제", None)])
-        self.assertEqual(rows[1]["nameVariants"], ["AB 프로젝트방"])
+        self.assertEqual(rows[1]["nameVariants"], ["AB 프로젝트방", "OAB 프로젝트방 4"])
 
     def test_self_chat_badge_is_removed_but_kept_as_raw_name(self):
         rows = _rows_from_ocr([line("0 홍길동", 120, 29), line("메모", 122, 56)], blank())

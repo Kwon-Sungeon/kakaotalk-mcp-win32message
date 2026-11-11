@@ -190,10 +190,6 @@ class Snapshot:
         self.skipped = skipped      # names of formats that cannot be preserved
         self.sequence = sequence_number
 
-    @property
-    def empty(self):
-        return not self.items
-
 
 def snapshot():
     """Copy every preservable clipboard format into process memory."""
@@ -231,15 +227,18 @@ def snapshot():
 
 
 def _write(items):
-    w.user32.EmptyClipboard()
+    """Put the items on the (open, emptied) clipboard; returns the names of formats that could not be set."""
+    failed = []
     for fmt, kind, data in items:
         if kind == "emf":
             handle = w.gdi32.SetEnhMetaFileBits(len(data), data)
         else:
             handle = _global_from_bytes(data)
         if not w.user32.SetClipboardData(fmt, handle):
+            failed.append(format_name(fmt))
             if kind == "global":
                 w.kernel32.GlobalFree(handle)
+    return failed
 
 
 def restore(saved, expected_sequence):
@@ -247,11 +246,15 @@ def restore(saved, expected_sequence):
     with _Open():
         if sequence() != expected_sequence:
             return {"restored": False, "reason": "clipboard_changed_by_another_program"}
-        if saved.empty:
-            w.user32.EmptyClipboard()
-        else:
-            _write(saved.items)
-    return {"restored": True, "formats": len(saved.items), "unpreservedFormats": saved.skipped}
+        if not w.user32.EmptyClipboard():
+            return {"restored": False, "reason": "clipboard_not_written"}
+        failed = _write(saved.items)
+    if failed and len(failed) == len(saved.items):
+        return {"restored": False, "reason": "clipboard_not_written", "failedFormats": failed}
+    result = {"restored": True, "formats": len(saved.items), "unpreservedFormats": saved.skipped}
+    if failed:
+        result["failedFormats"] = failed
+    return result
 
 
 def owner_process():
@@ -304,15 +307,20 @@ def capture_text(trigger, expected_pid, timeout=2.0):
                 _restore_if_ours(saved, expected_pid)
                 return None, {"copied": False, "restore": {"restored": True, "reason": "late_copy_reverted"}}
             return None, {"copied": False, "restore": {"restored": True, "reason": "clipboard_untouched"}}
-        # KakaoTalk may still hold the clipboard open while it writes; _Open retries.
-        with _Open(timeout=1.5):
-            after = sequence()
-            owner = owner_process()
-            text = read_unicode() if owner == expected_pid else None
+        try:
+            # KakaoTalk may still hold the clipboard open while it writes; _Open retries.
+            with _Open(timeout=1.5):
+                after = sequence()
+                owner = owner_process()
+                text = read_unicode() if owner == expected_pid else None
+            if owner == expected_pid:
+                restored = restore(saved, after)
+        except BaseException:
+            _restore_if_ours(saved, expected_pid)  # chat text must not stay on the user's clipboard
+            raise
         if owner != expected_pid:
             # Somebody else copied in the meantime: their data wins, ours is discarded.
             raise ClipboardConflict("Clipboard was changed by another program during the capture")
-        restored = restore(saved, after)
         return text, {"copied": text is not None, "restore": restored,
                       "clipboardMs": round((time.monotonic() - started) * 1000, 1)}
 

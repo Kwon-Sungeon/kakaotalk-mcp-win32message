@@ -7,7 +7,7 @@ from pathlib import Path
 
 METHODS = ("status", "windows", "rooms", "search_rooms", "open_room", "close_room", "read_messages",
            "read_many", "load_more", "search_messages", "read_full_text", "recent_messages", "capture",
-           "send_message", "send_result")
+           "send_message", "send_result", "create_room", "invite")
 SUCCESS = frozenset({"ok", "partial", "observed_in_window"})
 
 
@@ -114,10 +114,9 @@ def _failure(error, operation_id):
     shown = isinstance(error, (ValueError, PermissionError))
     report = {"status": "failed", "errorType": error.__class__.__name__,
               "detail": str(error) if shown else str(error)[:300]}
-    if operation_id:
-        report.update(status="outcome_unknown", operationId=operation_id, retrySafe=False)
-        if not shown:
-            report["detail"] = "Operation failed; check send_result with the same operation_id before retrying"
+    if operation_id and not shown:  # not a rejected argument: the send may have gone out
+        report.update(status="outcome_unknown", operationId=operation_id, retrySafe=False,
+                      detail="Operation failed; check send_result with the same operation_id before retrying")
     return report
 
 

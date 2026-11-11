@@ -13,6 +13,8 @@
     search_messages -> local search over the loaded messages
     send_message    -> composer EM_REPLACESEL + Enter, confirmed by re-reading (sender.py)
     send_result     -> journal lookup + read-only re-check
+    create_room     -> Ctrl+N "대화상대 선택" dialog: names searched, ticked and confirmed (people.py)
+    invite          -> chat window menu "초대", then the same dialog
 
 Every operation goes through the official app's own UI. Nothing talks to Kakao
 servers, reads Kakao's files or memory, or modifies the app.
@@ -37,6 +39,7 @@ from . import win32 as w
 
 SOURCE = "kakaotalk_pc_win32"
 SB_PAGEUP = 2
+VK_DOWN = 0x28
 SB_BOTTOM = 7
 SB_TOP = 6
 MESSAGE_KINDS = ("text", "media", "deleted")
@@ -81,6 +84,15 @@ def _clears_selection(method):
                         _clear_selection(chat)
                     except Exception:  # cosmetic only; never fail the operation for it
                         pass
+    return wrapper
+
+
+def _one_ocr_process(method):
+    """Every OCR pass inside the call shares one PowerShell process (started on first use)."""
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with cap.ocr_session():
+            return method(self, *args, **kwargs)
     return wrapper
 
 
@@ -137,7 +149,7 @@ class KakaoTalkWin:
         try:
             state = self._state()
         except ui.KakaoNotRunning as error:
-            return {**result, "status": "blocked", "reason": "kakaotalk_not_running", "detail": str(error)}
+            return {**result, "status": "blocked", "reason": error.reason, "detail": str(error)}
         result.update(kakaoTalk={"processId": state.pid, "image": state.image,
                                  "version": w.file_version(state.image), "signature": _signature(state.image)},
                       mainWindow=None if not state.main else {
@@ -158,6 +170,9 @@ class KakaoTalkWin:
             warnings.append("Windows clipboard history/sync is on: copied chat text may be kept there.")
         if state.main and state.main.locked:
             warnings.append("KakaoTalk is locked; unlock it in the app.")
+        if not safety.self_name():
+            warnings.append("selfName is not set: fromSelf is missing from messages and a send is confirmed without "
+                            "checking its author. Set it with `kakaotalk-win config --self-name`.")
         result["warnings"] = warnings
         return result
 
@@ -177,6 +192,7 @@ class KakaoTalkWin:
 
     # ------------------------------------------------------------------ rooms (capture + OCR)
 
+    @_one_ocr_process
     def rooms(self, query="", ocr=True, output_path=None, pages=1):
         """Capture the room list (optionally filtered by the app's search) page by page and OCR it.
 
@@ -249,12 +265,7 @@ class KakaoTalkWin:
             if page_rows:
                 result["items"] = _merge_pages(page_rows)
                 result["total"] = len(result["items"])
-        result["note"] = ("Names come from OCR and can contain recognition errors (icons may be read as a "
-                          "leading character). Check the images; open_room needs the exact room name. "
-                          "hasUnread comes from the red badge colour; unread is the badge number when legible. "
-                          "previewUnreadable=true: the row shows a preview OCR could not read (often a one-word "
-                          "reply); read the room for its content. nameUnreadable=true: a room is there (its "
-                          "time was read) but not its name; check the image.")
+        result["note"] = "Names come from OCR and can be wrong; check the image when a name matters."
         return result
 
     def search_rooms(self, query, pages=1):
@@ -263,11 +274,17 @@ class KakaoTalkWin:
 
     # ------------------------------------------------------------------ open / close
 
+    @_one_ocr_process
     @_clears_selection
-    def open_room(self, window_title, require_existing=True):
-        """Open an existing room by exact name via the app's room search; never creates a room."""
+    def open_room(self, window_title, accept_similar=False):
+        """Open an existing room by exact name via the app's room search; never creates a room.
+
+        The search results are read (OCR) before anything is opened: Enter goes to the row
+        that shows this name, and nothing is opened when no row does, because opening a room
+        marks its messages as read. accept_similar also takes a title that differs from an
+        OCR'd name only by recognition errors (used for names that came from the room list).
+        """
         check.room(window_title)
-        check.flag(require_existing, "require_existing")
         with safety.process_lock("ui"):
             state, chat, blocked = self._find_chat(window_title)
             if blocked:
@@ -285,11 +302,25 @@ class KakaoTalkWin:
                 return limited
             before = {item.hwnd for item in state.chats}
             previous = w.control_text(state.main.search_edit)
-            safety.record_open()
+
+            def fits(name):
+                return name == window_title or (accept_similar and _similar(window_title, name))
+
             try:
                 w.set_control_text(state.main.search_edit, window_title)
                 time.sleep(0.6)
-                w.post_key(state.main.search_edit, w.VK_RETURN)
+                found = _search_results(state.main)
+                place = 0  # unreadable results: the top one is tried and its title checked afterwards
+                if found is not None:
+                    place = _result_row(found, window_title)
+                    if place is None:
+                        return _blocked("room_not_found", searchResults=len(found),
+                                        detail="No room with this name in the app's room search; nothing was opened.")
+                safety.record_open()
+                for _ in range(place):
+                    w.post_key(state.main.search_list, VK_DOWN)
+                    time.sleep(0.05)
+                w.post_key(state.main.search_list if place else state.main.search_edit, w.VK_RETURN)
                 opened = None
                 deadline = time.monotonic() + 4
                 while time.monotonic() < deadline and opened is None:
@@ -304,19 +335,14 @@ class KakaoTalkWin:
                 w.set_control_text(state.main.search_edit, previous)
             if opened is None:
                 return _blocked("room_not_found", detail="The app's room search returned nothing to open")
-            if opened.title != window_title:
+            if not fits(opened.title):
                 closed = self._close_window(opened)
                 return _blocked("search_top_result_mismatch", openedTitle=opened.title, closedAgain=closed,
-                                detail="The top search result was a different room; it was closed again. "
-                                       "Retry with the exact openedTitle if that is the intended room.")
-            result = {"status": "ok", "source": SOURCE, "windowTitle": window_title, "alreadyOpen": False}
-            if require_existing:
-                try:
-                    _, items, _ = self._read_items(opened, state.pid)
-                    result["existingHistory"] = any(item["kind"] != "unclassified" for item in items)
-                except RuntimeError:
-                    result["existingHistory"] = None
-            return result
+                                readStateMayHaveChanged=True,
+                                detail="A different room opened and was closed again (its messages may now "
+                                       "count as read). Retry with the exact openedTitle if that is the room.")
+            return {"status": "ok", "source": SOURCE, "windowTitle": opened.title, "alreadyOpen": False,
+                    "readStateMayHaveChanged": True}
 
     def _close_window(self, chat):
         try:
@@ -350,9 +376,13 @@ class KakaoTalkWin:
     # ------------------------------------------------------------------ reading
 
     @_clears_selection
-    def read_messages(self, window_title, limit=50, offset=0, snapshot_id="", open_if_needed=False):
-        """Messages loaded in an open chat window, paged from the newest end (oldest first within a page)."""
+    def read_messages(self, window_title, limit=50, offset=0, snapshot_id="", open_if_needed=False, since=""):
+        """Messages loaded in an open chat window, paged from the newest end (oldest first within a page).
+
+        since ("YYYY-MM-DD" or "YYYY-MM-DD HH:MM") keeps only records from that moment on.
+        """
         check.room(window_title)
+        start = _moment(since, "since")
         check.number(limit, "limit", 1, 500)
         check.number(offset, "offset", 0, 100000)
         check.flag(open_if_needed, "open_if_needed")
@@ -374,8 +404,12 @@ class KakaoTalkWin:
         if snapshot_id not in ("", current):
             return {"status": "snapshot_changed", "source": SOURCE, "snapshotId": current, "items": [],
                     "reason": "The loaded messages changed; read again from offset 0"}
-        page, next_offset = _newest_page(items, limit, offset)
         notices = [item for item in items[-20:] if item["kind"] in ("system", "unclassified")]
+        if start:
+            first = next((at for at, item in enumerate(items) if (_item_time(item) or _day(item) or start) >= start),
+                         len(items))
+            items = items[first:]
+        page, next_offset = _newest_page(items, limit, offset)
         warnings = ["A recent notice mentions a restriction/protection measure; check the app."] \
             if any(safety.mentions_restriction(item.get("text")) for item in notices) else []
         dates = [item["date"] for item in items if item.get("date")]
@@ -388,8 +422,11 @@ class KakaoTalkWin:
                 "clipboard": info["restore"], "warnings": warnings, "elapsedMs": _elapsed_ms(began)}
 
     @_clears_selection
-    def read_many(self, window_titles, limit=50, open_if_needed=True, close_after=False):
-        """Read up to 10 rooms in turn. Never in parallel: every read passes through the one clipboard."""
+    def read_many(self, window_titles, limit=50, open_if_needed=False, close_after=False):
+        """Read up to 10 rooms in turn. Never in parallel: every read passes through the one clipboard.
+
+        Closed rooms are reported, not opened, unless open_if_needed=True (opening marks them as read).
+        """
         check.rooms(window_titles, most=10)
         check.number(limit, "limit", 1, 500)
         check.flag(open_if_needed, "open_if_needed")
@@ -397,26 +434,32 @@ class KakaoTalkWin:
         began = time.monotonic()
         results, newly_opened = [], []
         for title in window_titles:
-            open_before = bool(self._state().chats_titled(title))
             try:
+                open_before = bool(self._state().chats_titled(title))
                 outcome = self.read_messages(title, limit=limit, open_if_needed=open_if_needed)
+                if not open_before and self._state().chats_titled(title):
+                    newly_opened.append(title)
             except Exception as error:  # one failing room must not hide the others
                 outcome = {"status": "failed", "errorType": type(error).__name__, "detail": str(error)[:200]}
-            if not open_before and self._state().chats_titled(title):
-                newly_opened.append(title)
             results.append(dict(outcome, windowTitle=title))
             time.sleep(0.3)
         closed = [self.close_room(title) for title in newly_opened[::-1]] if close_after else []
         ok_count = len([entry for entry in results if entry.get("status") == "ok"])
         return {"status": "partial" if ok_count < len(results) else "ok", "source": SOURCE,
                 "items": results, "total": len(results), "succeeded": ok_count,
-                "windowsOpened": newly_opened, "cleanup": closed, "elapsedMs": _elapsed_ms(began)}
+                "windowsOpened": newly_opened, "readStateMayHaveChanged": newly_opened, "cleanup": closed,
+                "elapsedMs": _elapsed_ms(began)}
 
     @_clears_selection
-    def load_more(self, window_title, pages=1):
-        """Scroll the message list up so the app loads older messages, then go back to the bottom."""
+    def load_more(self, window_title, pages=1, until_date=""):
+        """Scroll the message list up so the app loads older messages, then go back to the bottom.
+
+        until_date ("YYYY-MM-DD") stops as soon as messages of that day or earlier are loaded;
+        pages stays the upper bound.
+        """
         check.room(window_title)
         check.number(pages, "pages", 1, 10)
+        goal = _moment(until_date, "until_date")
         with safety.process_lock("ui", wait_seconds=10):
             state, chat, blocked = self._find_chat(window_title)
             if blocked:
@@ -424,13 +467,20 @@ class KakaoTalkWin:
             if chat is None:
                 return _blocked("room_window_not_open")
 
+            oldest = [None]
+
             def loaded():
-                return len(self._read_items(chat, state.pid)[1])
+                items = self._read_items(chat, state.pid)[1]
+                oldest[0] = next((item["date"] for item in items if item.get("date")), None)
+                return len(items)
+
+            def reached():
+                return bool(goal and oldest[0] and oldest[0] <= goal.strftime("%Y-%m-%d"))
 
             first = current = loaded()
             steps = []
             try:
-                while len(steps) < pages:
+                while len(steps) < pages and not reached():
                     for _ in range(6):
                         w.post(chat.message_list, w.WM_VSCROLL, SB_PAGEUP, 0)
                     w.post(chat.message_list, w.WM_VSCROLL, SB_TOP, 0)
@@ -449,6 +499,7 @@ class KakaoTalkWin:
                 w.post(chat.message_list, w.WM_VSCROLL, SB_BOTTOM, 0)
         return {"status": "ok", "source": SOURCE, "windowTitle": window_title, "steps": steps,
                 "recordsBefore": first, "recordsAfter": current, "contentChanged": current != first,
+                "oldestDate": oldest[0], "untilDateReached": reached() if goal else None,
                 "historyComplete": False, "endOfHistory": None,
                 "note": "No growth does not prove the start of the conversation was reached."}
 
@@ -486,6 +537,7 @@ class KakaoTalkWin:
 
     # ------------------------------------------------------------------ long messages ("전체보기")
 
+    @_one_ocr_process
     @_clears_selection
     def read_full_text(self, window_title, max_messages=3, scroll_pages=10):
         """Full text of loaded messages that the app shortens to their first 500 characters.
@@ -574,8 +626,9 @@ class KakaoTalkWin:
 
     # ------------------------------------------------------------------ recent messages across rooms
 
+    @_one_ocr_process
     @_clears_selection
-    def recent_messages(self, minutes=60, open_rooms=False, list_pages=3, max_rooms=10):
+    def recent_messages(self, minutes=60, open_rooms=False, list_pages=3, max_rooms=10, window_titles=None):
         """Messages of the last `minutes` across rooms.
 
         The room list (newest first, read by OCR without opening anything) decides which
@@ -583,73 +636,78 @@ class KakaoTalkWin:
         and filtered by message time. Closed rooms are only listed under notRead unless
         open_rooms=True: then they are opened through the app's room search (which marks
         their messages as read), read, and closed again.
+
+        window_titles names open chat windows to read instead; the room list is not looked at.
         """
         check.number(minutes, "minutes", 1, 1440)
         check.flag(open_rooms, "open_rooms")
         check.number(list_pages, "list_pages", 1, 10)
         check.number(max_rooms, "max_rooms", 1, 20)
         began, now = time.monotonic(), datetime.now()
-        since = now - timedelta(minutes=minutes)
+        since = (now - timedelta(minutes=minutes)).replace(second=0, microsecond=0)  # messages carry minutes only
+        if window_titles:
+            check.rooms(window_titles, most=20)
+            rooms = [self._recent_in_room(title, {}, since) for title in window_titles]
+            return {"status": "ok", "source": SOURCE, "since": since.strftime("%Y-%m-%d %H:%M"), "minutes": minutes,
+                    "rooms": rooms, "notRead": [], "elapsedMs": _elapsed_ms(began)}
         listing = self.rooms(pages=list_pages)
         cap.discard(listing.get("imagePaths"))  # only the OCR'd rows are needed; never keep the screenshots
         if listing.get("status") != "ok" or "items" not in listing:
             return listing if listing.get("status") != "ok" else _blocked("room_list_unreadable", ocr=listing.get("ocr"))
         rows = listing["items"]
         stamps = [_row_time(row, now) for row in rows]
-        last = max((at for at, stamp in enumerate(stamps) if stamp and stamp >= since - timedelta(minutes=1)),
-                   default=-1)
-        candidates = rows[:last + 1]  # the list is newest first, so rows above an in-window row are in it too
-        older_seen = any(stamp and stamp < since for stamp in stamps[last + 1:])
+        last = max((at for at, stamp in enumerate(stamps) if stamp and stamp >= since), default=-1)
+        # Newest first, so a row above an in-window row is in the window too when its time was not
+        # read. A row with an older time up there is a pinned room: skipped, never opened.
+        candidates = [row for row, stamp in zip(rows[:last + 1], stamps) if stamp is None or stamp >= since]
+        timed = [stamp for stamp in stamps if stamp]
+        older_seen = bool(timed) and timed[-1] < since  # judged at the bottom: pinned rooms sit on top
         rooms, not_read, opened_here = [], [], []
         open_titles = [chat.title for chat in self._state().chats]
         claimed = {name for row in rows for name in _row_names(row) if name in open_titles}
         read_titles = set()
-        for row in candidates[:max_rooms]:
-            summary = {key: row.get(key) for key in ("name", "timeText", "preview", "hasUnread", "unread")}
-            if not row.get("name"):  # OCR could not read the name: nothing safe to match or open
-                not_read.append(dict(summary, reason="name_unreadable"))
-                continue
-            title = _match_title(row, open_titles, claimed)
-            if title in read_titles:  # two list rows resolved to one window: do not read or report it twice
-                not_read.append(dict(summary, reason="ambiguous_room_name"))
-                continue
-            if title is None and open_rooms:
-                title, problem = self._open_listed_room(row)
-                if title is None:
-                    not_read.append(dict(summary, reason=problem))
+        cleanup = []
+        try:
+            for row in candidates[:max_rooms]:
+                summary = {key: row.get(key) for key in ("name", "timeText", "preview", "hasUnread", "unread")}
+                if not row.get("name"):  # OCR could not read the name: nothing safe to match or open
+                    not_read.append(dict(summary, reason="name_unreadable"))
                     continue
-                opened_here.append(title)
-                open_titles.append(title)
-            elif title is None:
-                not_read.append(dict(summary, reason="room_window_not_open"))
-                continue
-            read_titles.add(title)
-            rooms.append(self._recent_in_room(title, row, since))
-        cleanup = [self.close_room(title) for title in opened_here]
+                title = _match_title(row, open_titles, claimed)
+                if title in read_titles:  # two list rows resolved to one window: do not read or report it twice
+                    not_read.append(dict(summary, reason="ambiguous_room_name"))
+                    continue
+                if title is None and open_rooms:
+                    title, problem = self._open_listed_room(row)
+                    if title is None:
+                        not_read.append(dict(summary, **problem))
+                        continue
+                    opened_here.append(title)
+                    open_titles.append(title)
+                elif title is None:
+                    not_read.append(dict(summary, reason="room_window_not_open"))
+                    continue
+                read_titles.add(title)
+                rooms.append(self._recent_in_room(title, row, since))
+        finally:  # windows this call opened are closed even when a room fails
+            cleanup = [self.close_room(title) for title in opened_here]
         return {"status": "ok", "source": SOURCE, "since": since.strftime("%Y-%m-%d %H:%M"), "minutes": minutes,
                 "rooms": rooms, "notRead": not_read, "roomsSkippedOverLimit": max(0, len(candidates) - max_rooms),
-                "markedAsRead": opened_here, "cleanup": cleanup,
+                "markedAsRead": opened_here, "readStateMayHaveChanged": opened_here, "cleanup": cleanup,
                 "listCoverage": {"pagesCaptured": listing.get("pagesCaptured"), "endOfList": listing.get("endOfList"),
                                  "reachedOlderRooms": older_seen,
                                  "complete": bool(older_seen or listing.get("endOfList"))},
                 "elapsedMs": _elapsed_ms(began)}
 
     def _open_listed_room(self, row):
-        """Open a room named by OCR: exact name, then variants, then the search's top hit if it is close."""
-        names = [row["name"]] + list(row.get("nameVariants") or [])
-        problem = "room_not_found"
-        for name in names:
-            opened = self.open_room(name, require_existing=False)
+        """Open a room named by OCR, trying its name and then its variants. Returns (title, problem)."""
+        problem = {"reason": "room_not_found"}
+        for name in _row_names(row):
+            opened = self.open_room(name, accept_similar=True)
             if opened.get("status") == "ok":
-                return name, None
-            problem = opened.get("reason") or problem
-            other = opened.get("openedTitle")
-            if opened.get("reason") == "search_top_result_mismatch" and other and _similar(name, other):
-                again = self.open_room(other, require_existing=False)
-                if again.get("status") == "ok":
-                    return other, None
-                problem = again.get("reason") or problem
-            if problem in ("open_rate_limit", "kakaotalk_locked", "main_window_not_found"):
+                return opened["windowTitle"], None
+            problem = {key: opened[key] for key in ("reason", "retryAfterSeconds") if opened.get(key) is not None}
+            if opened.get("reason") != "room_not_found":
                 break
         return None, problem
 
@@ -664,12 +722,13 @@ class KakaoTalkWin:
             if more.get("status") != "ok" or not more.get("contentChanged"):
                 break
             read = self.read_messages(title, limit=500)
-        fresh = [item for item in read["items"]
-                 if item["kind"] in MESSAGE_KINDS and _item_time(item) and _item_time(item) >= since]
+        messages = [item for item in read["items"] if item["kind"] in MESSAGE_KINDS]
+        fresh = [item for item in messages if _item_time(item) and _item_time(item) >= since]
+        undated = sum(1 for item in messages if not _item_time(item))  # cannot be placed in or out of the window
         oldest = _oldest_time(read["items"])
         return {"windowTitle": title, "status": "ok", "listName": row.get("name"), "messages": fresh,
-                "total": len(fresh), "olderPagesLoaded": loads,
-                "mayBeIncomplete": bool(oldest and oldest > since),
+                "total": len(fresh), "olderPagesLoaded": loads, "undatedMessages": undated,
+                "mayBeIncomplete": bool(undated or (oldest and oldest > since)),
                 "truncatedMessages": sum(bool(item.get("textTruncated")) for item in fresh)}
 
     # ------------------------------------------------------------------ capture (attachments, emoticons)
@@ -709,6 +768,20 @@ class KakaoTalkWin:
     def send_message(self, window_title, text, operation_id, wait_seconds=8, require_self=False):
         """One journaled send into an existing room (see sender.py for the full procedure)."""
         return self._sender().send(window_title, text, operation_id, wait_seconds, require_self)
+
+    # ------------------------------------------------------------------ new rooms and invitations
+
+    @_one_ocr_process
+    def create_room(self, names, room_name=""):
+        """Open a chat with the named friends through the app's new-chat dialog (see people.py)."""
+        from . import people
+        return people.create_room(self, names, room_name)
+
+    @_one_ocr_process
+    def invite(self, window_title, names):
+        """Invite the named friends into an open room through its menu (see people.py)."""
+        from . import people
+        return people.invite(self, window_title, names)
 
     @_clears_selection
     def send_result(self, operation_id, wait_seconds=0):
@@ -801,6 +874,26 @@ def _ocr_list_page(path, listing, scale):
             pass
 
 
+def _search_results(main):
+    """Rows the app's room search shows right now, top first; None when they cannot be read."""
+    if not (main.search_list and w.user32.IsWindowVisible(main.search_list)):
+        return None
+    shown = _show_without_activation(main.hwnd)
+    try:
+        image = cap.crop(cap.grab(main.hwnd), _relative_box(main.hwnd, main.search_list))
+    finally:
+        _restore_visibility(main.hwnd, shown)
+    scale = w.window_scale(main.hwnd)
+    path = cap.save_png(image)
+    try:
+        recognized = _ocr_list_page(path, image, scale)
+    finally:
+        cap.discard([path])
+    if recognized.get("status") != "ok":
+        return None
+    return _rows_from_ocr(recognized.get("lines", []), image, scale)
+
+
 def _capture_list_pages(window, listing, pages, scale):
     """Capture the list `pages` times, scrolling down by a page minus about a row in between.
 
@@ -876,8 +969,11 @@ def _clean_name(raw):
     row = {"name": name, "memberCount": members}
     if name != raw:
         row["rawName"] = raw
-    if _GLUED_ICON.match(name):
-        row["nameVariants"] = [name[1:]]
+    variants = [name[1:]] if _GLUED_ICON.match(name) else []
+    if match:  # the trailing number may belong to the name ("모임 2024"), not be a member count
+        variants.append(f"{name} {match['count']}")
+    if variants:
+        row["nameVariants"] = variants
     return row
 
 
@@ -1299,6 +1395,27 @@ def _row_time(row, now):
     return end_of_yesterday - timedelta(days=1)  # a weekday or a date: older than yesterday
 
 
+def _moment(text, name):
+    """A "YYYY-MM-DD" or "YYYY-MM-DD HH:MM" argument as a datetime, or None when empty."""
+    check.text(text, name, 16, allow_empty=True)
+    for layout in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, layout)
+        except ValueError:
+            pass
+    if text:
+        raise ValueError(f"{name}: use YYYY-MM-DD or YYYY-MM-DD HH:MM")
+    return None
+
+
+def _day(item):
+    """End of the day of a record that has a date but no time (system notices)."""
+    try:
+        return datetime.strptime(item.get("date") or "", "%Y-%m-%d") + timedelta(hours=23, minutes=59)
+    except ValueError:
+        return None
+
+
 def _item_time(item):
     try:
         return datetime.strptime(f"{item.get('date')} {item.get('time')}", "%Y-%m-%d %H:%M")
@@ -1319,13 +1436,37 @@ def _similar(ocr_name, title):
     shown, real = _comparable(ocr_name), _comparable(title)
     if not shown or not real:
         return False
-    if len(shown) >= 6 and real.startswith(shown):  # the list shortens long names with "…"
-        return True
-    # Rooms often differ only by a number ("24기 모임" / "25기 모임", "1팀" / "2팀"): never treat
+    # Rooms often differ only by a number ("24기 모임" / "25기 모임", "모임 1" / "모임 10"): never treat
     # names with different numbers as one room, however close the rest of the text is.
     if re.findall(r"\d+", shown) != re.findall(r"\d+", real):
         return False
+    if len(shown) >= 6 and real.startswith(shown):  # the list shortens long names with "…"
+        return True
     return difflib.SequenceMatcher(None, shown, real).ratio() >= 0.8
+
+
+def _letters(name):
+    return re.sub(r"[\W_]+", "", name or "").casefold()
+
+
+def _result_row(rows, title):
+    """Index of the search-result row that shows `title`, or None when no row can be it.
+
+    The list cuts long names short and OCR misreads icons, so letters and digits are
+    compared loosely; the opened window's title is what is checked exactly afterwards.
+    A row without readable letters could be any room and is only a last resort.
+    """
+    wanted, unknown = _letters(title), None
+    for at, row in enumerate(rows):
+        shown = [_letters(name) for name in _row_names(row)]
+        if not any(shown):
+            unknown = at if unknown is None else unknown
+        for name in filter(None, shown):
+            if re.findall(r"\d+", name) != re.findall(r"\d+", wanted):
+                continue
+            if name == wanted or (len(name) >= 4 and wanted.startswith(name))                     or difflib.SequenceMatcher(None, name, wanted).ratio() >= 0.75:
+                return at
+    return unknown
 
 
 def _row_names(row):
